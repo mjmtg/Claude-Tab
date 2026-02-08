@@ -1,0 +1,28 @@
+[package]
+name = "claude-tabs-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+claude-tabs-core = { path = "../crates/core" }
+claude-tabs-pty = { path = "../crates/pty" }
+claude-tabs-storage = { path = "../crates/storage" }
+claude-tabs-tauri-bridge = { path = "../crates/tauri-bridge" }
+claude-tabs-ext-claude-hooks = { path = "../crates/extensions/claude-hooks" }
+claude-tabs-ext-output-parser = { path = "../crates/extensions/output-parser" }
+claude-tabs-ext-auto-switch = { path = "../crates/extensions/auto-switch" }
+claude-tabs-ext-directory-tracker = { path = "../crates/extensions/directory-tracker" }
+tauri = { workspace = true, features = ["tray-icon", "devtools"] }
+tauri-plugin-dialog = "2"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[lib]
+name = "claude_tabs_app"
+crate-type = ["staticlib", "cdylib", "rlib"]

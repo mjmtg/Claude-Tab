@@ -1,0 +1,30 @@
+# Claude Tabs Default Configuration
+
+[general]
+theme = "dark"
+font_size = 14
+font_family = "JetBrains Mono, Menlo, Monaco, Consolas, monospace"
+
+[auto_switch]
+enabled = true
+countdown_seconds = 5
+pause_on_typing = true
+
+[terminal]
+cursor_blink = true
+scrollback = 10000
+webgl = true
+
+[session]
+default_provider = "claude-code"
+auto_create_on_launch = false
+
+[notifications]
+enabled = true
+sound = false
+
+[shortcuts]
+new_tab = "Cmd+T"
+close_tab = "Cmd+W"
+command_palette = "Cmd+K"
+quick_switch = "Cmd+Shift+P"

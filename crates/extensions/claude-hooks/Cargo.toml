@@ -1,0 +1,13 @@
+[package]
+name = "claude-tabs-ext-claude-hooks"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+claude-tabs-core = { path = "../../core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
