@@ -2,10 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import type { IKeybindingManager, KeybindingDefinition } from "../../types/kernel";
 import { useConfig } from "../../kernel/ConfigProvider";
 
-// Re-export type for backwards compatibility
-type Keybinding = KeybindingDefinition;
-
-let settingsBindings: Keybinding[] = [];
+let settingsBindings: KeybindingDefinition[] = [];
 let showSettings = false;
 let settingsListeners: Array<() => void> = [];
 let keybindingManagerInstance: IKeybindingManager | null = null;
@@ -15,7 +12,7 @@ export function notifySettings() {
 }
 
 export function setSettingsState(
-  bindings: Keybinding[],
+  bindings: KeybindingDefinition[],
   visible: boolean,
   manager?: IKeybindingManager
 ) {
@@ -93,9 +90,9 @@ function KeyRecorder({
   allBindings,
   onDone,
 }: {
-  binding: Keybinding;
+  binding: KeybindingDefinition;
   manager: IKeybindingManager;
-  allBindings: Keybinding[];
+  allBindings: KeybindingDefinition[];
   onDone: () => void;
 }) {
   const [recording, setRecording] = useState(false);
@@ -178,7 +175,7 @@ function KeyRecorder({
 
 export function SettingsPanel() {
   const [visible, setVisible] = useState(false);
-  const [bindings, setBindings] = useState<Keybinding[]>([]);
+  const [bindings, setBindings] = useState<KeybindingDefinition[]>([]);
   const [, setRefresh] = useState(0);
   const config = useConfig();
 
@@ -189,16 +186,25 @@ export function SettingsPanel() {
   const inactivitySeconds = config.get<number>("autoFocus.inactivitySeconds", 5);
   const countdownSeconds = config.get<number>("autoFocus.countdownSeconds", 3);
 
+  // Session idle timeout (minutes before session transitions to Idle state)
+  const idleTimeoutMinutes = config.get<number>("session.idleTimeoutMinutes", 30);
+
   useEffect(() => {
     const update = () => {
+      const wasVisible = visible;
       setVisible(showSettings);
       setBindings([...settingsBindings]);
+      if (!showSettings && wasVisible) {
+        // Return focus to terminal when settings closes
+        const terminal = document.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement;
+        if (terminal) terminal.focus();
+      }
     };
     settingsListeners.push(update);
     return () => {
       settingsListeners = settingsListeners.filter((l) => l !== update);
     };
-  }, []);
+  }, [visible]);
 
   if (!visible) return null;
 
@@ -215,7 +221,7 @@ export function SettingsPanel() {
   };
 
   // Group bindings by extension
-  const grouped = bindings.reduce<Record<string, Keybinding[]>>((acc, b) => {
+  const grouped = bindings.reduce<Record<string, KeybindingDefinition[]>>((acc, b) => {
     const key = b.extensionId;
     if (!acc[key]) acc[key] = [];
     acc[key].push(b);
@@ -231,11 +237,11 @@ export function SettingsPanel() {
   };
 
   return (
-    <div className="settings-backdrop" onClick={close}>
-      <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
+    <div className="settings-backdrop" onClick={close} role="presentation">
+      <div className="settings-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Settings" aria-modal="true">
         <div className="settings-panel-header">
           <span className="settings-panel-title">Settings</span>
-          <button className="settings-panel-close" onClick={close}>
+          <button className="settings-panel-close" onClick={close} aria-label="Close settings">
             &times;
           </button>
         </div>
@@ -312,6 +318,22 @@ export function SettingsPanel() {
               min={1}
               max={10}
               suffix="s"
+            />
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <span className="settings-item-label">Idle timeout</span>
+              <span className="settings-item-desc">
+                Minutes of inactivity before a session transitions to Idle state
+              </span>
+            </div>
+            <NumberInput
+              value={idleTimeoutMinutes}
+              onChange={(val) => config.set("session.idleTimeoutMinutes", val)}
+              min={1}
+              max={120}
+              suffix="min"
             />
           </div>
 

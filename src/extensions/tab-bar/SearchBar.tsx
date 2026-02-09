@@ -57,17 +57,30 @@ export function SearchBar({ onResultClick, inputRef }: SearchBarProps) {
     debounceRef.current = setTimeout(() => doSearch(val), 250);
   };
 
+  const [selectedIdx, setSelectedIdx] = useState(-1);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       setQuery("");
       setResults([]);
       setIsOpen(false);
+      setSelectedIdx(-1);
+    } else if (e.key === "ArrowDown" && isOpen) {
+      e.preventDefault();
+      setSelectedIdx(prev => Math.min(prev + 1, results.length - 1));
+    } else if (e.key === "ArrowUp" && isOpen) {
+      e.preventDefault();
+      setSelectedIdx(prev => Math.max(prev - 1, 0));
+    } else if (e.key === "Enter" && isOpen && selectedIdx >= 0 && results[selectedIdx]) {
+      e.preventDefault();
+      handleResultClick(results[selectedIdx]);
     }
   };
 
   const handleResultClick = (result: SearchResult) => {
     setIsOpen(false);
     setQuery("");
+    setSelectedIdx(-1);
     onResultClick({ session_id: result.session_id });
   };
 
@@ -87,20 +100,28 @@ export function SearchBar({ onResultClick, inputRef }: SearchBarProps) {
       <input
         ref={inputRef}
         className="search-bar-input"
+        data-search-bar
         type="text"
         placeholder="Search sessions..."
         value={query}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         onFocus={() => { if (results.length > 0) setIsOpen(true); }}
+        role="combobox"
+        aria-expanded={isOpen}
+        aria-controls="search-bar-listbox"
+        aria-autocomplete="list"
+        aria-label="Search sessions"
       />
       {isOpen && (
-        <div className="search-bar-dropdown">
+        <div className="search-bar-dropdown" id="search-bar-listbox" role="listbox">
           {results.map((r, idx) => (
             <div
               key={`${r.session_id}-${idx}`}
-              className="search-bar-result"
+              className={`search-bar-result ${idx === selectedIdx ? "selected" : ""}`}
               onClick={() => handleResultClick(r)}
+              role="option"
+              aria-selected={idx === selectedIdx}
             >
               <div className="search-bar-result-title">
                 {truncate(r.title, 60)}

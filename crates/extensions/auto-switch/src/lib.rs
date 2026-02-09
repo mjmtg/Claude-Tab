@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use claude_tabs_core::event_bus::{Event, EventBus};
 use claude_tabs_core::session::SessionStore;
-use claude_tabs_core::state_machine::Transition;
+use claude_tabs_core::state_machine::{SessionState, Transition};
 use claude_tabs_core::traits::extension::{
     ActivationContext, Extension, ExtensionError, ExtensionManifest,
 };
@@ -79,9 +79,7 @@ impl Reaction for AutoSwitchReaction {
     }
 
     fn triggers(&self) -> Vec<ReactionTrigger> {
-        vec![ReactionTrigger::EnterState(
-            "core.permission_needed".to_string(),
-        )]
+        vec![ReactionTrigger::EnterState(SessionState::YourTurn)]
     }
 
     async fn execute(
@@ -145,7 +143,7 @@ impl Reaction for AutoSwitchReaction {
             let sessions = session_store.list().await;
             let next = sessions
                 .iter()
-                .find(|s| s.state == "core.permission_needed" && s.id != sid);
+                .find(|s| s.state == SessionState::YourTurn && s.id != sid);
 
             if let Some(next_session) = next {
                 session_store.set_active(Some(next_session.id.clone())).await;

@@ -18,14 +18,35 @@ export type EventHandler = (event: CoreEvent) => void;
 export type UnsubscribeFn = () => void;
 
 export const CORE_EVENTS = {
+  // Session lifecycle
   SESSION_CREATED: "session.created",
   SESSION_CLOSED: "session.closed",
   SESSION_STATE_CHANGED: "session.state_changed",
+  SESSION_RENAMED: "session.renamed",
+  SESSION_METADATA_CHANGED: "session.metadata_changed",
+  SESSION_ACTIVE_CHANGED: "session.active_changed",
+  // PTY
   PTY_OUTPUT: "pty.output",
   PTY_EXIT: "pty.exit",
-  DETECTION_TRIGGERED: "detection.triggered",
+  PTY_RESIZED: "pty.resized",
+  // Config
   CONFIG_CHANGED: "config.changed",
+  CONFIG_RELOADED: "config.reloaded",
+  // Extension
   EXTENSION_ACTIVATED: "extension.activated",
+  EXTENSION_DEACTIVATED: "extension.deactivated",
+  EXTENSION_ACTIVATION_FAILED: "extension.activation_failed",
+  // Hooks
+  HOOK_RECEIVED: "hook.received",
+  HOOK_PERMISSION_NEEDED: "hook.permission_needed",
+  // Profile
+  PROFILE_SAVED: "profile.saved",
+  PROFILE_DELETED: "profile.deleted",
+  PROFILE_LAUNCHED: "profile.launched",
+  // System
+  SYSTEM_STARTUP: "system.startup",
+  SYSTEM_SHUTDOWN: "system.shutdown",
+  SYSTEM_ERROR: "system.error",
 } as const;
 
 /**

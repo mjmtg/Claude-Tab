@@ -1,197 +1,175 @@
+use crate::session::SessionStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::debug;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct State {
-    pub id: String,
-    pub display_name: String,
-    pub color: String,
-    pub icon: Option<String>,
-    pub priority: u32,
-    pub category: String,
-    pub valid_from: Vec<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionState {
+    Active,
+    Running,
+    YourTurn,
+    Paused,
+    Idle,
 }
 
-impl State {
-    pub fn new(id: impl Into<String>, display_name: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            display_name: display_name.into(),
-            color: "#808080".to_string(),
-            icon: None,
-            priority: 0,
-            category: "default".to_string(),
-            valid_from: Vec::new(),
+impl SessionState {
+    pub fn display_name(&self) -> &str {
+        match self {
+            SessionState::Active => "Active",
+            SessionState::Running => "Running",
+            SessionState::YourTurn => "Your Turn",
+            SessionState::Paused => "Paused",
+            SessionState::Idle => "Idle",
         }
     }
 
-    pub fn with_color(mut self, color: impl Into<String>) -> Self {
-        self.color = color.into();
-        self
+    pub fn color(&self) -> &str {
+        match self {
+            SessionState::Active => "#4caf50",
+            SessionState::Running => "#2196f3",
+            SessionState::YourTurn => "#ff9800",
+            SessionState::Paused => "#ff5722",
+            SessionState::Idle => "#808080",
+        }
     }
 
-    pub fn with_priority(mut self, priority: u32) -> Self {
-        self.priority = priority;
-        self
+    pub fn as_str(&self) -> &str {
+        match self {
+            SessionState::Active => "active",
+            SessionState::Running => "running",
+            SessionState::YourTurn => "your_turn",
+            SessionState::Paused => "paused",
+            SessionState::Idle => "idle",
+        }
     }
+}
 
-    pub fn with_category(mut self, category: impl Into<String>) -> Self {
-        self.category = category.into();
-        self
-    }
-
-    pub fn with_valid_from(mut self, from: Vec<String>) -> Self {
-        self.valid_from = from;
-        self
+impl std::fmt::Display for SessionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transition {
     pub session_id: String,
-    pub from: String,
-    pub to: String,
+    pub from: SessionState,
+    pub to: SessionState,
     pub trigger: String,
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
-pub type TransitionGuard = Arc<dyn Fn(&Transition) -> bool + Send + Sync>;
-
-pub struct StateRegistry {
-    states: Arc<RwLock<HashMap<String, State>>>,
-    guards: Arc<RwLock<Vec<TransitionGuard>>>,
-}
-
-impl StateRegistry {
-    pub fn new() -> Self {
-        let registry = Self {
-            states: Arc::new(RwLock::new(HashMap::new())),
-            guards: Arc::new(RwLock::new(Vec::new())),
-        };
-        registry
-    }
-
-    pub async fn register_core_states(&self) {
-        let core_states = vec![
-            State::new("idle", "Idle")
-                .with_color("#808080")
-                .with_priority(0)
-                .with_category("core"),
-            State::new("active", "Active")
-                .with_color("#4caf50")
-                .with_priority(1)
-                .with_category("core"),
-            State::new("running", "Running")
-                .with_color("#2196f3")
-                .with_priority(2)
-                .with_category("core"),
-            State::new("your_turn", "Your Turn")
-                .with_color("#ff9800")
-                .with_priority(10)
-                .with_category("core"),
-        ];
-
-        let mut states = self.states.write().await;
-        for state in core_states {
-            states.insert(state.id.clone(), state);
-        }
-    }
-
-    pub async fn register_state(&self, state: State) {
-        debug!(state_id = %state.id, "Registering state");
-        self.states.write().await.insert(state.id.clone(), state);
-    }
-
-    pub async fn get_state(&self, id: &str) -> Option<State> {
-        self.states.read().await.get(id).cloned()
-    }
-
-    pub async fn list_states(&self) -> Vec<State> {
-        self.states.read().await.values().cloned().collect()
-    }
-
-    pub async fn add_guard(&self, guard: TransitionGuard) {
-        self.guards.write().await.push(guard);
-    }
-
-    pub async fn validate_transition(&self, transition: &Transition) -> bool {
-        let states = self.states.read().await;
-
-        if let Some(target_state) = states.get(&transition.to) {
-            if !target_state.valid_from.is_empty()
-                && !target_state.valid_from.contains(&transition.from)
-            {
-                return false;
-            }
-        }
-        drop(states);
-
-        let guards = self.guards.read().await;
-        for guard in guards.iter() {
-            if !guard(transition) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-impl Default for StateRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Error type for state transition failures.
+#[derive(Debug, thiserror::Error)]
+pub enum TransitionError {
+    #[error("Session not found: {0}")]
+    SessionNotFound(String),
+    #[error("Transition from '{from}' to '{to}' is not allowed (trigger: {trigger})")]
+    InvalidTransition {
+        from: SessionState,
+        to: SessionState,
+        trigger: String,
+    },
+    #[error("No state change needed (already in '{0}')")]
+    NoChange(SessionState),
 }
 
 pub struct StateMachine {
-    pub registry: StateRegistry,
+    session_store: Arc<SessionStore>,
 }
 
 impl StateMachine {
-    pub fn new() -> Self {
-        Self {
-            registry: StateRegistry::new(),
-        }
+    pub fn new(session_store: Arc<SessionStore>) -> Self {
+        Self { session_store }
     }
 
-    pub async fn init(&self) {
-        self.registry.register_core_states().await;
+    /// Check whether a transition from one state to another is valid.
+    pub fn is_valid_transition(from: SessionState, to: SessionState) -> bool {
+        use SessionState::*;
+        matches!(
+            (from, to),
+            // Active -> Running (user submits prompt)
+            (Active, Running)
+            // Running -> YourTurn (permission/elicitation)
+            | (Running, YourTurn)
+            // Running -> Paused (interrupt)
+            | (Running, Paused)
+            // Running -> Active (Stop hook)
+            | (Running, Active)
+            // YourTurn -> Running (user submits prompt)
+            | (YourTurn, Running)
+            // Paused -> Running (user submits prompt)
+            | (Paused, Running)
+            // Any -> Idle (timeout)
+            | (Active, Idle)
+            | (Running, Idle)
+            | (YourTurn, Idle)
+            | (Paused, Idle)
+            // Idle -> Active (visit/focus)
+            | (Idle, Active)
+            // Any -> Active (SessionStart)
+            | (YourTurn, Active)
+            | (Paused, Active)
+        )
     }
 
-    pub async fn transition(
+    /// Transition a session's state.
+    ///
+    /// 1. Looks up the session's current state
+    /// 2. Validates the transition
+    /// 3. Updates the session state in the store
+    /// 4. Returns the completed `Transition` or a `TransitionError`
+    pub async fn transition_session(
         &self,
         session_id: &str,
-        from: &str,
-        to: &str,
+        to: SessionState,
         trigger: &str,
-    ) -> Option<Transition> {
+    ) -> Result<Transition, TransitionError> {
+        let session = self
+            .session_store
+            .get(session_id)
+            .await
+            .ok_or_else(|| TransitionError::SessionNotFound(session_id.to_string()))?;
+
+        let from = session.state;
+
+        if from == to {
+            return Err(TransitionError::NoChange(to));
+        }
+
+        if !Self::is_valid_transition(from, to) {
+            return Err(TransitionError::InvalidTransition {
+                from,
+                to,
+                trigger: trigger.to_string(),
+            });
+        }
+
+        self.session_store.update_state(session_id, to).await;
+
         let transition = Transition {
             session_id: session_id.to_string(),
-            from: from.to_string(),
-            to: to.to_string(),
+            from,
+            to,
             trigger: trigger.to_string(),
             metadata: HashMap::new(),
         };
 
-        if self.registry.validate_transition(&transition).await {
-            Some(transition)
-        } else {
-            debug!(
-                session_id = %session_id,
-                from = %from,
-                to = %to,
-                "Transition blocked"
-            );
-            None
-        }
-    }
-}
+        debug!(
+            session_id = %session_id,
+            from = %from,
+            to = %to,
+            trigger = %trigger,
+            "State transition completed"
+        );
 
-impl Default for StateMachine {
-    fn default() -> Self {
-        Self::new()
+        Ok(transition)
+    }
+
+    /// Returns a reference to the internal session store.
+    pub fn session_store(&self) -> &Arc<SessionStore> {
+        &self.session_store
     }
 }

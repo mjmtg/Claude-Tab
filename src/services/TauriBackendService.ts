@@ -138,6 +138,22 @@ export class TauriBackendService implements IBackendService {
   async launchProfile(request: ProfileLaunchRequest): Promise<SessionInfo> {
     return invoke<SessionInfo>("launch_profile", { request });
   }
+
+  // -------------------------------------------------------------------------
+  // Session Metadata
+  // -------------------------------------------------------------------------
+
+  async setSessionHidden(sessionId: string, hidden: boolean): Promise<void> {
+    await invoke("set_session_hidden", { sessionId, hidden });
+  }
+
+  async getSessionChain(sessionId: string): Promise<SessionInfo[]> {
+    return invoke<SessionInfo[]>("get_session_chain", { sessionId });
+  }
+
+  async triggerTitleGeneration(sessionId: string): Promise<void> {
+    await invoke("trigger_title_generation", { sessionId });
+  }
 }
 
 /**

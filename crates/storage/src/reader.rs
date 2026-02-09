@@ -2,9 +2,9 @@
 //!
 //! Reads full conversation content from Claude Code JSONL session files.
 
-use crate::models::SessionMessage;
+use crate::models::{ClaudeSession, SessionMessage};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use tracing::warn;
 
@@ -12,6 +12,97 @@ use tracing::warn;
 pub struct SessionReader;
 
 impl SessionReader {
+    /// Build a ClaudeSession from a JSONL file by reading its first few lines
+    /// and file metadata. This is the single source of truth for session info.
+    pub fn read_session_metadata(jsonl_path: &Path) -> Option<ClaudeSession> {
+        let file = File::open(jsonl_path).ok()?;
+        let mtime = file.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
+                .unwrap_or_default().to_rfc3339())
+            .unwrap_or_default();
+
+        let reader = BufReader::new(file);
+        let mut session_id = None;
+        let mut cwd = None;
+        let mut git_branch = None;
+        let mut created_at = None;
+        let mut first_prompt = None;
+
+        for line in reader.lines().take(20) {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let val: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Extract metadata from any line that has it
+            if session_id.is_none() {
+                session_id = val.get("sessionId").and_then(|v| v.as_str()).map(String::from);
+            }
+            if cwd.is_none() {
+                cwd = val.get("cwd").and_then(|v| v.as_str()).map(String::from);
+            }
+            if git_branch.is_none() {
+                git_branch = val.get("gitBranch").and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty()).map(String::from);
+            }
+            if created_at.is_none() {
+                created_at = val.get("timestamp").and_then(|v| v.as_str()).map(String::from);
+            }
+
+            // Extract first user prompt
+            if first_prompt.is_none() {
+                let msg_type = val.get("type").and_then(|v| v.as_str());
+                if msg_type == Some("user") {
+                    if let Ok(msg) = serde_json::from_value::<SessionMessage>(val) {
+                        if let Some(text) = Self::extract_text(msg.content()) {
+                            if !Self::is_system_noise(&text) {
+                                first_prompt = Some(text);
+                            }
+                        }
+                    }
+                    // If we have everything, stop reading
+                    if session_id.is_some() && cwd.is_some() && first_prompt.is_some() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // Stop early if we have all metadata
+            if session_id.is_some() && cwd.is_some() && first_prompt.is_some() {
+                break;
+            }
+        }
+
+        // session_id is required — derive from filename if not in content
+        let session_id = session_id.or_else(|| {
+            jsonl_path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        })?;
+
+        Some(ClaudeSession {
+            session_id,
+            project_path: cwd.unwrap_or_default(),
+            jsonl_path: jsonl_path.to_string_lossy().to_string(),
+            first_prompt,
+            summary: None,
+            message_count: 0,
+            created_at: created_at.unwrap_or_default(),
+            modified_at: mtime,
+            git_branch,
+        })
+    }
+
     /// Read all messages from a JSONL session file.
     pub fn read_session(jsonl_path: &Path) -> Result<Vec<SessionMessage>, std::io::Error> {
         let file = File::open(jsonl_path)?;
@@ -35,6 +126,85 @@ impl SessionReader {
         Ok(messages)
     }
 
+    /// Read the last message from a JSONL file by seeking from the end.
+    pub fn read_last_message(jsonl_path: &Path) -> Option<SessionMessage> {
+        let mut file = File::open(jsonl_path).ok()?;
+        let file_len = file.metadata().ok()?.len();
+        if file_len == 0 {
+            return None;
+        }
+
+        // Read the last 32KB — more than enough for any single JSONL line
+        let read_from = file_len.saturating_sub(32768);
+        file.seek(SeekFrom::Start(read_from)).ok()?;
+
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).ok()?;
+
+        // Find the last non-empty line
+        buf.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .and_then(|line| serde_json::from_str::<SessionMessage>(line).ok())
+    }
+
+    /// Extract the first user prompt text from a JSONL file.
+    pub fn extract_first_prompt(jsonl_path: &Path) -> Option<String> {
+        let file = File::open(jsonl_path).ok()?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let msg: SessionMessage = match serde_json::from_str(&line) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if msg.message_type != "user" {
+                continue;
+            }
+            if let Some(text) = Self::extract_text(msg.content()) {
+                if Self::is_system_noise(&text) {
+                    continue;
+                }
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    /// Check if the last message in a JSONL file is an interruption.
+    pub fn is_interrupted(jsonl_path: &Path) -> bool {
+        let msg = match Self::read_last_message(jsonl_path) {
+            Some(m) => m,
+            None => return false,
+        };
+
+        if msg.message_type != "user" {
+            return false;
+        }
+
+        let content = match msg.content() {
+            Some(c) => c,
+            None => return false,
+        };
+
+        // Content can be a string or array of content blocks
+        match content {
+            serde_json::Value::String(s) => s.starts_with("[Request interrupted by user"),
+            serde_json::Value::Array(arr) => arr.iter().any(|item| {
+                item.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && item
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map_or(false, |t| t.starts_with("[Request interrupted by user"))
+            }),
+            _ => false,
+        }
+    }
+
     /// Stream messages from a JSONL file (lazy iterator).
     pub fn stream_session(jsonl_path: &Path) -> Result<impl Iterator<Item = SessionMessage>, std::io::Error> {
         let file = File::open(jsonl_path)?;
@@ -56,8 +226,8 @@ impl SessionReader {
         for msg in messages {
             match msg.message_type.as_str() {
                 "user" | "assistant" => {
-                    let role = msg.role.as_deref().unwrap_or(&msg.message_type);
-                    if let Some(text) = Self::extract_text(&msg.content) {
+                    let role = msg.role().unwrap_or(&msg.message_type);
+                    if let Some(text) = Self::extract_text(msg.content()) {
                         output.push_str(&format!("**{}**: {}\n\n", role, text));
                     }
                 }
@@ -73,31 +243,37 @@ impl SessionReader {
         output
     }
 
+    /// Check if a message is system noise that should not be used as a title.
+    fn is_system_noise(text: &str) -> bool {
+        let trimmed = text.trim_start();
+        trimmed.starts_with("[Request interrupted")
+            || trimmed.starts_with("<system-reminder>")
+            || trimmed.starts_with("<local-command-caveat>")
+            || trimmed.starts_with("<command-name>")
+    }
+
     /// Extract plain text from message content.
-    fn extract_text(content: &Option<serde_json::Value>) -> Option<String> {
+    fn extract_text(content: Option<&serde_json::Value>) -> Option<String> {
         match content {
             Some(serde_json::Value::String(s)) => Some(s.clone()),
             Some(serde_json::Value::Array(arr)) => {
                 let mut texts = Vec::new();
                 for item in arr {
-                    if item.get("type").and_then(|v| v.as_str()) == Some("text") {
-                        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                            texts.push(text.to_string());
-                        }
-                    }
-                    // Handle tool_use and tool_result blocks
-                    if let Some(tool_type) = item.get("type").and_then(|v| v.as_str()) {
-                        match tool_type {
-                            "tool_use" => {
-                                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                                    texts.push(format!("[Tool: {}]", name));
-                                }
+                    match item.get("type").and_then(|v| v.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                texts.push(text.to_string());
                             }
-                            "tool_result" => {
-                                texts.push("[Tool Result]".to_string());
-                            }
-                            _ => {}
                         }
+                        Some("tool_use") => {
+                            if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                                texts.push(format!("[Tool: {}]", name));
+                            }
+                        }
+                        Some("tool_result") => {
+                            texts.push("[Tool Result]".to_string());
+                        }
+                        _ => {}
                     }
                 }
                 if texts.is_empty() {
@@ -117,21 +293,21 @@ mod tests {
 
     #[test]
     fn test_extract_text_string() {
-        let content = Some(serde_json::Value::String("Hello world".to_string()));
-        assert_eq!(SessionReader::extract_text(&content), Some("Hello world".to_string()));
+        let content = serde_json::Value::String("Hello world".to_string());
+        assert_eq!(SessionReader::extract_text(Some(&content)), Some("Hello world".to_string()));
     }
 
     #[test]
     fn test_extract_text_array() {
-        let content = Some(serde_json::json!([
+        let content = serde_json::json!([
             {"type": "text", "text": "Hello"},
             {"type": "text", "text": "World"}
-        ]));
-        assert_eq!(SessionReader::extract_text(&content), Some("Hello\nWorld".to_string()));
+        ]);
+        assert_eq!(SessionReader::extract_text(Some(&content)), Some("Hello\nWorld".to_string()));
     }
 
     #[test]
     fn test_extract_text_none() {
-        assert_eq!(SessionReader::extract_text(&None), None);
+        assert_eq!(SessionReader::extract_text(None), None);
     }
 }

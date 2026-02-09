@@ -1,4 +1,4 @@
-use crate::state_machine::Transition;
+use crate::state_machine::{SessionState, Transition};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -6,18 +6,18 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReactionTrigger {
-    EnterState(String),
-    ExitState(String),
-    Transition { from: String, to: String },
+    EnterState(SessionState),
+    ExitState(SessionState),
+    Transition { from: SessionState, to: SessionState },
 }
 
 impl ReactionTrigger {
     pub fn matches(&self, transition: &Transition) -> bool {
         match self {
-            ReactionTrigger::EnterState(state) => &transition.to == state,
-            ReactionTrigger::ExitState(state) => &transition.from == state,
+            ReactionTrigger::EnterState(state) => transition.to == *state,
+            ReactionTrigger::ExitState(state) => transition.from == *state,
             ReactionTrigger::Transition { from, to } => {
-                &transition.from == from && &transition.to == to
+                transition.from == *from && transition.to == *to
             }
         }
     }

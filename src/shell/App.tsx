@@ -74,15 +74,22 @@ function useKernel() {
   }, []);
 }
 
+function useRegistryUpdates(registry: ComponentRegistry) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    return registry.subscribe(() => setTick((t) => t + 1));
+  }, [registry]);
+}
+
 export function App() {
   const [ready, setReady] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
   const kernel = useKernel();
-  const [, forceUpdate] = useState(0);
+  useRegistryUpdates(kernel.registry);
   const cleanupRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const {
-      registry,
       eventBus,
       keybindingManager,
       eventListener,
@@ -91,11 +98,11 @@ export function App() {
       extensionHost,
     } = kernel;
 
-    const unsubRegistry = registry.subscribe(() => forceUpdate((n) => n + 1));
+    // Wire up FocusManager so SessionStateManager can query inactivity in tick()
+    sessionStateManager.setFocusManager(focusManager);
 
     // Store cleanup function
     cleanupRef.current = () => {
-      unsubRegistry();
       extensionHost.deactivateAll();
       keybindingManager.destroy();
       eventBus.destroy();
@@ -113,8 +120,9 @@ export function App() {
         await extensionHost.activateAll();
         setReady(true);
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         console.error("[App] Init failed:", err);
-        setReady(true);
+        setInitError(message);
       }
     })();
 
@@ -125,6 +133,21 @@ export function App() {
       }
     };
   }, [kernel]);
+
+  if (initError) {
+    return (
+      <div style={{ padding: 20, color: "#ff6b6b", fontFamily: "monospace" }}>
+        <h2>Initialization Failed</h2>
+        <pre>{initError}</pre>
+        <button
+          onClick={() => window.location.reload()}
+          style={{ marginTop: 10, padding: "8px 16px", cursor: "pointer" }}
+        >
+          Reload
+        </button>
+      </div>
+    );
+  }
 
   if (!ready) {
     return <div className="app-loading">Loading...</div>;

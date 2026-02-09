@@ -1,5 +1,7 @@
 use crate::event_bus::EventBus;
 use crate::session::SessionStore;
+use crate::state_machine::{SessionState, StateMachine};
+use claude_tabs_storage::SessionScanner;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,12 +25,17 @@ struct HookMessage {
     session_id: String,
     hook_event_name: String,
     claude_session_id: Option<String>,
-    // For Notification hook
+    #[serde(default)]
+    tool_name: Option<String>,
     #[serde(default)]
     notification_type: Option<String>,
-    // For PostToolUseFailure hook
-    #[serde(default)]
-    is_interrupt: Option<bool>,
+}
+
+enum HookAction {
+    Transition(SessionState, &'static str),
+    RemoveSession,
+    EmitOnly,
+    Ignore,
 }
 
 pub struct HookListener;
@@ -72,7 +79,6 @@ impl HookListener {
                 .and_then(|s| s.strip_suffix(".sock"))
             {
                 if let Ok(pid) = pid_str.parse::<u32>() {
-                    // Check if process is alive via kill(pid, 0)
                     let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
                     if !alive {
                         let path = entry.path();
@@ -147,10 +153,14 @@ impl HookListener {
                 hooks_obj.insert("SessionStart".to_string(), hook_entry.clone());
                 hooks_obj.insert("UserPromptSubmit".to_string(), hook_entry.clone());
                 hooks_obj.insert("PermissionRequest".to_string(), hook_entry.clone());
+                hooks_obj.insert("PreToolUse".to_string(), hook_entry.clone());
                 hooks_obj.insert("PostToolUse".to_string(), hook_entry.clone());
                 hooks_obj.insert("PostToolUseFailure".to_string(), hook_entry.clone());
                 hooks_obj.insert("Notification".to_string(), hook_entry.clone());
-                hooks_obj.insert("Stop".to_string(), hook_entry);
+                hooks_obj.insert("Stop".to_string(), hook_entry.clone());
+                hooks_obj.insert("SessionEnd".to_string(), hook_entry.clone());
+                hooks_obj.insert("SubagentStart".to_string(), hook_entry.clone());
+                hooks_obj.insert("SubagentStop".to_string(), hook_entry);
             }
         }
 
@@ -162,6 +172,7 @@ impl HookListener {
     }
 
     pub fn start(
+        state_machine: Arc<StateMachine>,
         session_store: Arc<SessionStore>,
         event_bus: Arc<EventBus>,
         idle_timeout_secs: Option<u64>,
@@ -182,6 +193,7 @@ impl HookListener {
             Arc::new(Mutex::new(HashMap::new()));
 
         // Task 1: Socket listener
+        let sm = state_machine.clone();
         let ss = session_store.clone();
         let eb = event_bus.clone();
         let activity = last_activity.clone();
@@ -200,19 +212,25 @@ impl HookListener {
 
             loop {
                 match listener.accept().await {
-                    Ok((mut stream, _)) => {
+                    Ok((stream, _)) => {
+                        let sm = sm.clone();
                         let ss = ss.clone();
                         let eb = eb.clone();
                         let activity = activity.clone();
 
                         tokio::spawn(async move {
+                            const MAX_MSG_SIZE: usize = 65536; // 64KB limit
                             let mut buf = Vec::with_capacity(4096);
-                            if let Err(e) = stream.read_to_end(&mut buf).await {
+                            if let Err(e) = stream.take(MAX_MSG_SIZE as u64).read_to_end(&mut buf).await {
                                 debug!(error = %e, "Failed to read from hook connection");
                                 return;
                             }
+                            if buf.len() >= MAX_MSG_SIZE {
+                                warn!("Hook message exceeded 64KB limit, discarding");
+                                return;
+                            }
                             let data = String::from_utf8_lossy(&buf);
-                            Self::handle_message(&data, &ss, &eb, &activity).await;
+                            Self::handle_message(&data, &sm, &ss, &eb, &activity).await;
                         });
                     }
                     Err(e) => {
@@ -222,7 +240,9 @@ impl HookListener {
             }
         });
 
-        // Task 2: Idle timeout checker (every 30s)
+        // Task 2: Idle timeout checker + stale state recovery (every 30s)
+        let sm_idle = state_machine;
+        let ss_idle = session_store;
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
@@ -237,30 +257,121 @@ impl HookListener {
                 drop(timestamps);
 
                 for session_id in timed_out {
-                    let session = session_store.get(&session_id).await;
-                    if let Some(s) = session {
-                        if s.state == "active" {
-                            session_store.update_state(&session_id, "idle").await;
+                    match sm_idle
+                        .transition_session(&session_id, SessionState::Idle, "idle_timeout")
+                        .await
+                    {
+                        Ok(transition) => {
                             let event = crate::Event::new(
                                 "session.state_changed",
                                 serde_json::json!({
                                     "session_id": session_id,
-                                    "from": "active",
-                                    "to": "idle",
+                                    "from": transition.from,
+                                    "to": SessionState::Idle,
                                 }),
                             );
                             event_bus.emit(event).await;
                             info!(session_id = %session_id, "Session went idle (timeout)");
                         }
+                        Err(e) => {
+                            debug!(session_id = %session_id, error = %e, "Idle transition skipped");
+                        }
                     }
                     last_activity.lock().await.remove(&session_id);
+                }
+
+                // Stale state recovery: running > 5 min with no hook events -> active
+                let stale_sessions: Vec<String> = {
+                    let activity_map = last_activity.lock().await;
+                    let sessions = ss_idle.list().await;
+                    let mut stale = Vec::new();
+                    for session in &sessions {
+                        if session.state == SessionState::Running {
+                            let is_stale = activity_map
+                                .get(&session.id)
+                                .map(|&ts| now.duration_since(ts) > Duration::from_secs(300))
+                                .unwrap_or(true);
+                            if is_stale {
+                                stale.push(session.id.clone());
+                            }
+                        } else if session.state == SessionState::YourTurn {
+                            let long_wait = activity_map
+                                .get(&session.id)
+                                .map(|&ts| now.duration_since(ts) > Duration::from_secs(1800))
+                                .unwrap_or(false);
+                            if long_wait {
+                                warn!(session_id = %session.id, "Session in your_turn for > 30 minutes");
+                            }
+                        }
+                    }
+                    stale
+                };
+
+                for session_id in stale_sessions {
+                    match sm_idle
+                        .transition_session(&session_id, SessionState::Active, "stale_recovery")
+                        .await
+                    {
+                        Ok(transition) => {
+                            let event = crate::Event::new(
+                                "session.state_changed",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "from": transition.from,
+                                    "to": SessionState::Active,
+                                }),
+                            );
+                            event_bus.emit(event).await;
+                            warn!(session_id = %session_id, "Stale recovery: running -> active (no hooks for 5 min)");
+                        }
+                        Err(e) => {
+                            debug!(session_id = %session_id, error = %e, "Stale recovery transition skipped");
+                        }
+                    }
                 }
             }
         });
     }
 
+    fn resolve_action(msg: &HookMessage) -> HookAction {
+        match msg.hook_event_name.as_str() {
+            "SessionStart" => HookAction::Transition(SessionState::Active, "hook.SessionStart"),
+            "UserPromptSubmit" => HookAction::Transition(SessionState::Running, "hook.UserPromptSubmit"),
+            "PermissionRequest" => HookAction::Transition(SessionState::YourTurn, "hook.PermissionRequest"),
+            "PreToolUse" => {
+                if msg.tool_name.as_deref() == Some("AskUserQuestion") {
+                    HookAction::Transition(SessionState::YourTurn, "hook.PreToolUse.AskUserQuestion")
+                } else {
+                    HookAction::Ignore
+                }
+            }
+            "Notification" => {
+                match msg.notification_type.as_deref() {
+                    Some("elicitation_dialog") | Some("permission_prompt") => {
+                        HookAction::Transition(SessionState::YourTurn, "hook.Notification.elicitation")
+                    }
+                    _ => {
+                        debug!(notification_type = ?msg.notification_type, "Ignoring notification");
+                        HookAction::Ignore
+                    }
+                }
+            }
+            "Stop" => HookAction::Transition(SessionState::Active, "hook.Stop"),
+            "PostToolUse" => HookAction::Transition(SessionState::Running, "hook.PostToolUse"),
+            "PostToolUseFailure" => HookAction::Ignore,
+            "SessionEnd" => HookAction::RemoveSession,
+            "SubagentStart" => HookAction::Transition(SessionState::Running, "hook.SubagentStart"),
+            "SubagentStop" => HookAction::EmitOnly,
+            _ => {
+                debug!(event = %msg.hook_event_name, "Ignoring unhandled hook event");
+                HookAction::Ignore
+            }
+        }
+    }
+
     async fn handle_message(
         data: &str,
+        state_machine: &StateMachine,
         session_store: &SessionStore,
         event_bus: &EventBus,
         last_activity: &Mutex<HashMap<String, Instant>>,
@@ -277,12 +388,24 @@ impl HookListener {
             session_id = %msg.session_id,
             event = %msg.hook_event_name,
             claude_session_id = ?msg.claude_session_id,
+            tool_name = ?msg.tool_name,
             "Hook event received"
         );
 
         // Store claude_session_id in session metadata if present
         if let Some(ref claude_sid) = msg.claude_session_id {
             if !claude_sid.is_empty() {
+                // Check if claude_session_id changed (e.g. after /clear)
+                let sid_changed = if let Some(session) = session_store.get(&msg.session_id).await {
+                    session
+                        .metadata
+                        .get("claude_session_id")
+                        .and_then(|v| v.as_str())
+                        .map_or(true, |old| old != claude_sid)
+                } else {
+                    true
+                };
+
                 session_store
                     .set_metadata(
                         &msg.session_id,
@@ -290,6 +413,17 @@ impl HookListener {
                         serde_json::Value::String(claude_sid.clone()),
                     )
                     .await;
+
+                // Reset title tracking so the new session's prompt gets picked up
+                if sid_changed {
+                    session_store
+                        .set_metadata(
+                            &msg.session_id,
+                            "jsonl_title",
+                            serde_json::Value::Bool(false),
+                        )
+                        .await;
+                }
             }
         }
 
@@ -299,15 +433,11 @@ impl HookListener {
             .await
             .insert(msg.session_id.clone(), Instant::now());
 
-        let session = match session_store.get(&msg.session_id).await {
-            Some(s) => s,
-            None => {
-                warn!(session_id = %msg.session_id, "Hook event for unknown session");
-                return;
-            }
-        };
-
-        let from = session.state.clone();
+        // Verify the session exists
+        if session_store.get(&msg.session_id).await.is_none() {
+            warn!(session_id = %msg.session_id, "Hook event for unknown session");
+            return;
+        }
 
         // Mark session as having received user input (for archive gating)
         if msg.hook_event_name == "UserPromptSubmit" {
@@ -322,66 +452,90 @@ impl HookListener {
             serde_json::json!({
                 "session_id": msg.session_id,
                 "claude_session_id": msg.claude_session_id,
+                "tool_name": msg.tool_name,
             }),
         );
         event_bus.emit(hook_event).await;
 
-        let new_state = match msg.hook_event_name.as_str() {
-            "UserPromptSubmit" => "running",
-            "PostToolUse" => "running",
-            "PermissionRequest" => "your_turn",
-            "Stop" => "active",
-            // Handle interrupts/cancellations - transition to active so user knows they can interact
-            "PostToolUseFailure" => {
-                if msg.is_interrupt.unwrap_or(false) {
-                    info!(session_id = %msg.session_id, "Tool use interrupted by user");
-                    "active"
-                } else {
-                    // Non-interrupt failure, stay in running state
-                    debug!(session_id = %msg.session_id, "Tool use failed (not interrupt)");
-                    return;
-                }
+        // For Stop events, check JSONL to distinguish user interrupt from natural completion.
+        // Small delay: the Stop hook can fire before Claude Code flushes the
+        // interruption message to the JSONL file.
+        let action = if msg.hook_event_name == "Stop" {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let is_interrupted = msg
+                .claude_session_id
+                .as_deref()
+                .filter(|sid| !sid.is_empty())
+                .and_then(|sid| {
+                    SessionScanner::new()
+                        .ok()
+                        .map(|scanner| scanner.is_session_interrupted(sid))
+                })
+                .unwrap_or(false);
+
+            if is_interrupted {
+                HookAction::Transition(SessionState::Paused, "hook.Stop.interrupted")
+            } else {
+                HookAction::Transition(SessionState::Active, "hook.Stop")
             }
-            // Handle notifications - permission_prompt and idle_prompt indicate waiting for input
-            "Notification" => {
-                match msg.notification_type.as_deref() {
-                    Some("permission_prompt") => "your_turn",
-                    Some("idle_prompt") => "active",
-                    _ => {
-                        debug!(notification_type = ?msg.notification_type, "Ignoring notification");
-                        return;
+        } else {
+            Self::resolve_action(&msg)
+        };
+
+        match action {
+            HookAction::Transition(new_state, trigger) => {
+                match state_machine
+                    .transition_session(&msg.session_id, new_state, trigger)
+                    .await
+                {
+                    Ok(transition) => {
+                        let event = crate::Event::new(
+                            "session.state_changed",
+                            serde_json::json!({
+                                "session_id": msg.session_id,
+                                "from": transition.from,
+                                "to": new_state,
+                            }),
+                        );
+                        event_bus.emit(event).await;
+
+                        info!(
+                            session_id = %msg.session_id,
+                            from = %transition.from,
+                            to = %new_state,
+                            trigger = %trigger,
+                            "Session state changed via hook"
+                        );
+                    }
+                    Err(e) => {
+                        debug!(
+                            session_id = %msg.session_id,
+                            to = %new_state,
+                            trigger = %trigger,
+                            error = %e,
+                            "Hook state transition failed"
+                        );
                     }
                 }
             }
-            other => {
-                debug!(event = %other, "Ignoring unhandled hook event");
-                return;
+            HookAction::RemoveSession => {
+                // SessionEnd: remove from activity tracking, emit event
+                last_activity.lock().await.remove(&msg.session_id);
+                let event = crate::Event::new(
+                    "session.ended",
+                    serde_json::json!({
+                        "session_id": msg.session_id,
+                        "claude_session_id": msg.claude_session_id,
+                    }),
+                );
+                event_bus.emit(event).await;
+                info!(session_id = %msg.session_id, "Session ended (hook)");
             }
-        };
-
-        if from == new_state {
-            return;
+            HookAction::EmitOnly => {
+                debug!(session_id = %msg.session_id, event = %msg.hook_event_name, "Hook event emitted (no state change)");
+            }
+            HookAction::Ignore => {}
         }
-
-        session_store
-            .update_state(&msg.session_id, new_state)
-            .await;
-
-        let event = crate::Event::new(
-            "session.state_changed",
-            serde_json::json!({
-                "session_id": msg.session_id,
-                "from": from,
-                "to": new_state,
-            }),
-        );
-        event_bus.emit(event).await;
-
-        info!(
-            session_id = %msg.session_id,
-            from = %from,
-            to = %new_state,
-            "Session state changed via hook"
-        );
     }
 }

@@ -12,7 +12,12 @@ export type {
   IComponentRegistry,
   IKeybindingManager,
   IConfigProvider,
+  IFocusManager,
+  ISessionStateManager,
   KeybindingDefinition,
+  FocusState,
+  SwitchState,
+  ToastState,
 } from "../types/kernel";
 
 // Re-export service interfaces and singletons

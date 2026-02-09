@@ -236,12 +236,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pattern_matching() {
-        assert!(matches_pattern("*", "anything"));
-        assert!(matches_pattern("core.*", "core.session"));
-        assert!(!matches_pattern("core.*", "core.session.created"));
-        assert!(matches_pattern("core.**", "core.session.created"));
-        assert!(matches_pattern("session.created", "session.created"));
-        assert!(!matches_pattern("session.created", "session.closed"));
+    fn test_topic_index_matching() {
+        let mut index = TopicIndex::new();
+
+        // Register handlers with different patterns
+        index.add(1, "*");                    // global wildcard
+        index.add(2, "core.*");               // single-level wildcard
+        index.add(3, "core.**");              // deep wildcard
+        index.add(4, "session.created");      // exact match
+
+        // Global wildcard matches anything
+        let matches = index.get_matching_handlers("anything");
+        assert!(matches.contains(&1));
+
+        // Single-level wildcard: core.* matches core.session but not core.session.created
+        let matches = index.get_matching_handlers("core.session");
+        assert!(matches.contains(&1)); // global
+        assert!(matches.contains(&2)); // core.*
+        assert!(matches.contains(&3)); // core.**
+
+        let matches = index.get_matching_handlers("core.session.created");
+        assert!(matches.contains(&1));  // global
+        assert!(!matches.contains(&2)); // core.* should NOT match
+        assert!(matches.contains(&3));  // core.** should match
+
+        // Exact match
+        let matches = index.get_matching_handlers("session.created");
+        assert!(matches.contains(&1)); // global
+        assert!(matches.contains(&4)); // exact
+
+        let matches = index.get_matching_handlers("session.closed");
+        assert!(matches.contains(&1));  // global
+        assert!(!matches.contains(&4)); // exact should NOT match
     }
 }

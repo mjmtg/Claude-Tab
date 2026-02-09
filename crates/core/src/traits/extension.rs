@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::event_bus::EventBus;
 use crate::session::SessionStore;
-use crate::state_machine::StateRegistry;
 use crate::traits::detector::DetectorRegistry;
 use crate::traits::provider::ProviderRegistry;
 use crate::traits::reaction::ReactionRegistry;
@@ -41,35 +40,12 @@ impl ExtensionManifest {
 }
 
 /// Context provided to extensions during activation.
-///
-/// Contains references to all core services that extensions may need:
-/// - `event_bus`: Publish/subscribe event system
-/// - `config`: Application configuration
-/// - `state_registry`: State machine states
-/// - `detector_registry`: State detectors (output parsers, hooks)
-/// - `reaction_registry`: State change reactions
-/// - `session_store`: Active session management
-/// - `provider_registry`: Session providers (bash, claude-code)
 pub struct ActivationContext {
-    /// Event bus for pub/sub communication
     pub event_bus: Arc<EventBus>,
-
-    /// Application configuration
     pub config: Arc<Config>,
-
-    /// State registry for state machine
-    pub state_registry: Arc<StateRegistry>,
-
-    /// Detector registry for state detection
     pub detector_registry: Arc<DetectorRegistry>,
-
-    /// Reaction registry for state change reactions
     pub reaction_registry: Arc<ReactionRegistry>,
-
-    /// Session store for active sessions
     pub session_store: Arc<SessionStore>,
-
-    /// Provider registry for session providers
     pub provider_registry: Arc<ProviderRegistry>,
 }
 

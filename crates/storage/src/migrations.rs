@@ -2,37 +2,16 @@ use rusqlite::Connection;
 use tracing::info;
 
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let version = get_schema_version(conn);
-
-    // Migration to v4: Drop session indexing tables, keep only preferences
-    if version < 4 {
-        migrate_v4(conn)?;
-        set_schema_version(conn, 4)?;
-        info!("Storage schema migrated to v4 (simplified: preferences only)");
-    }
-
-    Ok(())
-}
-
-fn get_schema_version(conn: &Connection) -> i32 {
-    conn.pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap_or(0)
-}
-
-fn set_schema_version(conn: &Connection, version: i32) -> Result<(), rusqlite::Error> {
-    conn.pragma_update(None, "user_version", version)?;
-    Ok(())
-}
-
-fn migrate_v4(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Drop old tables to rebuild from scratch
     conn.execute_batch(
         "
-        -- Drop old session indexing tables (now read from Claude's files directly)
-        DROP TABLE IF EXISTS claude_sessions;
-        DROP TABLE IF EXISTS scan_state;
-        DROP TABLE IF EXISTS archived_sessions;
+        DROP TABLE IF EXISTS session_metadata;
+        DROP TABLE IF EXISTS directory_preferences;
+        ",
+    )?;
 
-        -- User preferences for directory filtering/pinning (the only table we need)
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS directory_preferences (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_path TEXT NOT NULL UNIQUE,
@@ -40,7 +19,27 @@ fn migrate_v4(conn: &Connection) -> Result<(), rusqlite::Error> {
             hidden INTEGER DEFAULT 0,
             display_name TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS session_metadata (
+            claude_session_id TEXT PRIMARY KEY,
+            project_path TEXT NOT NULL DEFAULT '',
+            custom_title TEXT,
+            user_set_title INTEGER DEFAULT 0,
+            generated_title TEXT,
+            hidden INTEGER DEFAULT 0,
+            previous_session_id TEXT,
+            last_known_state TEXT,
+            last_state_change_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_metadata_updated ON session_metadata(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_session_metadata_project ON session_metadata(project_path);
+        CREATE INDEX IF NOT EXISTS idx_session_previous ON session_metadata(previous_session_id);
         ",
     )?;
+
+    info!("Storage schema initialized");
     Ok(())
 }

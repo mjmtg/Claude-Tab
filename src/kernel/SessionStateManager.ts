@@ -17,7 +17,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ISessionStateManager, SwitchState, ToastState, SessionInfo } from "../types/kernel";
+import { ISessionStateManager, SwitchState, ToastState } from "../types/kernel";
+import type { IFocusManager } from "../types/kernel";
+import type { SessionInfo } from "../types/session";
 
 type StateChangeListener = (state: SwitchState, toast: ToastState | null) => void;
 
@@ -38,28 +40,23 @@ export class SessionStateManager implements ISessionStateManager {
   private cachedSessions: SessionInfo[] = [];
   private cachedActiveSessionId: string | null = null;
 
-  // Configuration (injected from ConfigProvider)
+  // Configuration (injected via updateConfig from ConfigProvider)
   private config = {
     enabled: true,
     inactivitySeconds: 5,
     countdownSeconds: 3,
   };
 
-  // Dependency injection
-  private getInactivitySeconds: () => number;
+  // Optional FocusManager reference for tick-based inactivity checks
+  private focusManager: IFocusManager | null = null;
 
-  constructor(getInactivitySeconds?: () => number) {
-    this.getInactivitySeconds = getInactivitySeconds || (() => {
-      const stored = localStorage.getItem("config.autoFocus.inactivitySeconds");
-      if (stored) {
-        try {
-          return JSON.parse(stored) as number;
-        } catch {
-          // fall through
-        }
-      }
-      return 5;
-    });
+  constructor() {}
+
+  /**
+   * Set the FocusManager reference so tick() can query inactivity.
+   */
+  setFocusManager(focusManager: IFocusManager): void {
+    this.focusManager = focusManager;
   }
 
   get state(): SwitchState {
@@ -119,16 +116,14 @@ export class SessionStateManager implements ISessionStateManager {
 
   /**
    * Check inactivity and potentially trigger toast.
-   * Called by external code (e.g., FocusManager) with current inactivity time.
+   * Called by tick() or external code with current inactivity time.
    */
   checkInactivity(inactivitySeconds: number): void {
     if (this._state !== "idle") return;
     if (!this.config.enabled) return;
 
-    const threshold = this.getInactivitySeconds();
-    if (inactivitySeconds < threshold) return;
+    if (inactivitySeconds < this.config.inactivitySeconds) return;
 
-    this.transitionTo("checking_inactivity");
     this.evaluateSwitch();
   }
 
@@ -216,6 +211,11 @@ export class SessionStateManager implements ISessionStateManager {
       this.unsubCoreEvent = null;
     }
 
+    if (this.refreshDebounceTimeout) {
+      clearTimeout(this.refreshDebounceTimeout);
+      this.refreshDebounceTimeout = null;
+    }
+
     this.listeners.clear();
     this._declinedSessionIds.clear();
   }
@@ -225,14 +225,16 @@ export class SessionStateManager implements ISessionStateManager {
   // ============================================================================
 
   private tick(): void {
-    // Only check inactivity when idle
     if (this._state !== "idle") return;
+    if (!this.focusManager) return;
 
-    // This will be called by the component that owns both FocusManager and SessionStateManager
-    // The tick just ensures we stay responsive
+    this.checkInactivity(this.focusManager.inactivitySeconds);
   }
 
   private async evaluateSwitch(): Promise<void> {
+    // Transition to checking while we refresh data
+    this.transitionTo("checking_inactivity");
+
     // Ensure fresh data
     await this.refreshSessions();
 
@@ -240,12 +242,7 @@ export class SessionStateManager implements ISessionStateManager {
     const activeSessionId = this.cachedActiveSessionId;
 
     // Need at least 2 sessions
-    if (sessions.length < 2) {
-      this.transitionTo("idle");
-      return;
-    }
-
-    if (!activeSessionId) {
+    if (sessions.length < 2 || !activeSessionId) {
       this.transitionTo("idle");
       return;
     }
@@ -277,11 +274,10 @@ export class SessionStateManager implements ISessionStateManager {
     }
 
     // Show toast
-    const countdownSeconds = this.getCountdownSeconds();
     this._toastState = {
       targetSessionId: yourTurnSession.id,
       targetSessionName: yourTurnSession.title || `Session ${yourTurnSession.id.slice(0, 8)}`,
-      countdownSeconds,
+      countdownSeconds: this.config.countdownSeconds,
     };
     this.transitionTo("showing_toast");
   }
@@ -344,15 +340,4 @@ export class SessionStateManager implements ISessionStateManager {
     }
   }
 
-  private getCountdownSeconds(): number {
-    const stored = localStorage.getItem("config.autoFocus.countdownSeconds");
-    if (stored) {
-      try {
-        return JSON.parse(stored) as number;
-      } catch {
-        // fall through
-      }
-    }
-    return 3;
-  }
 }

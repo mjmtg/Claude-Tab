@@ -25,14 +25,16 @@ if event:
     msg = {'session_id': '$SESSION_ID', 'hook_event_name': event}
     if claude_sid:
         msg['claude_session_id'] = claude_sid
+    # Forward tool_name for PreToolUse/PostToolUse hooks
+    if event in ('PreToolUse', 'PostToolUse', 'PostToolUseFailure'):
+        tool = data.get('tool_name')
+        if tool:
+            msg['tool_name'] = tool
     # Forward notification type for Notification hooks
     if event == 'Notification':
         notif_type = data.get('notification_type') or data.get('type')
         if notif_type:
             msg['notification_type'] = notif_type
-    # Forward is_interrupt for PostToolUseFailure hooks
-    if event == 'PostToolUseFailure':
-        msg['is_interrupt'] = data.get('is_interrupt', False)
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(1)

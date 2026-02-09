@@ -19,7 +19,12 @@ export type {
   IComponentRegistry,
   IKeybindingManager,
   IConfigProvider,
+  IFocusManager,
+  ISessionStateManager,
   KeybindingDefinition,
+  FocusState,
+  SwitchState,
+  ToastState,
 } from "../types/kernel";
 
 // ============================================================================
@@ -28,10 +33,15 @@ export type {
 
 export { EventBus } from "./EventBus";
 export { ComponentRegistry } from "./ComponentRegistry";
-export { KeybindingManager, type Keybinding } from "./KeybindingManager";
+export { KeybindingManager } from "./KeybindingManager";
+export { FocusManager } from "./FocusManager";
+export { SessionStateManager } from "./SessionStateManager";
 export { ConfigProvider, useConfig } from "./ConfigProvider";
 export { ExtensionHost, type ExtensionHostConfig } from "./ExtensionHost";
 export { EventBusProvider, useEventBus, useEventBusOptional } from "./EventBusContext";
+export { FocusProvider, useFocus, useWindowFocused } from "./FocusContext";
+export { SessionStateProvider, useSessionState, useToastState } from "./SessionStateContext";
+export { KeybindingManagerProvider, useKeybindingManager } from "./KeybindingManagerContext";
 export {
   createStateStore,
   useStateStore,

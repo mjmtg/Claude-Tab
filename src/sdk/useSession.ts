@@ -18,7 +18,19 @@ export function useSession() {
     refresh();
 
     let unlisten: (() => void) | null = null;
-    listen("core-event", () => refresh()).then((u) => {
+    listen<{ topic: string; payload: Record<string, unknown> }>("core-event", (e) => {
+      const { topic } = e.payload;
+      if (
+        topic === "session.created" ||
+        topic === "session.closed" ||
+        topic === "session.state_changed" ||
+        topic === "session.renamed" ||
+        topic === "session.active_changed" ||
+        topic === "session.metadata_changed"
+      ) {
+        refresh();
+      }
+    }).then((u) => {
       unlisten = u;
     });
 

@@ -69,13 +69,13 @@ export interface IComponentRegistry {
 // ============================================================================
 
 export interface KeybindingDefinition {
-  id: string;
+  readonly id: string;
   keys: string;
   defaultKeys?: string;
-  label: string;
-  handler: () => void;
-  extensionId: string;
-  when?: string;
+  readonly label: string;
+  readonly handler: () => void;
+  readonly extensionId: string;
+  readonly when?: string;
 }
 
 /**
@@ -190,15 +190,9 @@ export type SwitchState =
   | "cooldown";
 
 export interface ToastState {
-  targetSessionId: string;
-  targetSessionName: string;
-  countdownSeconds: number;
-}
-
-export interface SessionInfo {
-  id: string;
-  state: string;
-  title: string;
+  readonly targetSessionId: string;
+  readonly targetSessionName: string;
+  readonly countdownSeconds: number;
 }
 
 /**
@@ -216,6 +210,12 @@ export interface ISessionStateManager {
 
   /** Initialize the manager */
   init(): Promise<void>;
+
+  /** Set the FocusManager reference for tick-based inactivity checks */
+  setFocusManager(focusManager: IFocusManager): void;
+
+  /** Update configuration values */
+  updateConfig(config: { enabled?: boolean; inactivitySeconds?: number; countdownSeconds?: number }): void;
 
   /** Check inactivity and potentially trigger toast */
   checkInactivity(inactivitySeconds: number): void;

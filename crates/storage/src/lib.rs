@@ -3,7 +3,7 @@
 //! Provides persistence functionality for Claude Tabs:
 //! - `StorageBackend`: Trait for storage implementations
 //! - `SqliteBackend`: SQLite-based storage (preferences only)
-//! - `SessionScanner`: Reads sessions from Claude's sessions-index.json files
+//! - `SessionScanner`: Scans JSONL session files from ~/.claude/projects/
 //! - `SessionReader`: Reads session JSONL files
 
 pub mod migrations;
@@ -14,7 +14,7 @@ pub mod sqlite;
 pub mod traits;
 
 // Re-export public API
-pub use models::{ClaudeSession, DirectoryPreference, SessionFilter, SessionMessage};
+pub use models::{ClaudeSession, DirectoryPreference, MessagePayload, SessionFilter, SessionMessage, SessionMetadata};
 pub use reader::SessionReader;
 pub use scanner::SessionScanner;
 pub use sqlite::SqliteBackend;

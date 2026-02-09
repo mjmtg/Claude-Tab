@@ -5,48 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { UnifiedTerminal } from "./UnifiedTerminal";
 
-// Maximum number of "hot" terminals to keep in memory
-const MAX_HOT_TERMINALS = 3;
-
-// LRU cache for terminal access order
-class TerminalLRU {
-  private order: string[] = [];
-
-  touch(sessionId: string): void {
-    // Remove if exists, then add to end (most recent)
-    const idx = this.order.indexOf(sessionId);
-    if (idx !== -1) {
-      this.order.splice(idx, 1);
-    }
-    this.order.push(sessionId);
-  }
-
-  remove(sessionId: string): void {
-    const idx = this.order.indexOf(sessionId);
-    if (idx !== -1) {
-      this.order.splice(idx, 1);
-    }
-  }
-
-  // Get sessions that should be "cold" (disposed)
-  getColdSessions(allSessions: Set<string>, maxHot: number): string[] {
-    // Filter to only include sessions that still exist
-    const validOrder = this.order.filter(id => allSessions.has(id));
-    this.order = validOrder;
-
-    // Sessions beyond maxHot from the end are cold
-    if (validOrder.length <= maxHot) return [];
-    return validOrder.slice(0, validOrder.length - maxHot);
-  }
-
-  // Get the hot sessions (most recently accessed)
-  getHotSessions(allSessions: Set<string>, maxHot: number): Set<string> {
-    const validOrder = this.order.filter(id => allSessions.has(id));
-    const hotIds = validOrder.slice(-maxHot);
-    return new Set(hotIds);
-  }
-}
-
 // Memoized UnifiedTerminal to prevent unnecessary re-renders
 const MemoizedUnifiedTerminal = React.memo(UnifiedTerminal, (prev, next) =>
   prev.sessionId === next.sessionId && prev.isActive === next.isActive
@@ -55,23 +13,7 @@ const MemoizedUnifiedTerminal = React.memo(UnifiedTerminal, (prev, next) =>
 function TerminalPanel() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Set<string>>(new Set());
-  const [hotSessions, setHotSessions] = useState<Set<string>>(new Set());
   const mountedRef = useRef(true);
-  const lruRef = useRef(new TerminalLRU());
-
-  // Update hot sessions based on LRU
-  const updateHotSessions = useCallback((allSessions: Set<string>, currentActive: string | null) => {
-    // Always ensure active session is hot
-    if (currentActive) {
-      lruRef.current.touch(currentActive);
-    }
-    const hot = lruRef.current.getHotSessions(allSessions, MAX_HOT_TERMINALS);
-    // Always include active session in hot set
-    if (currentActive && allSessions.has(currentActive)) {
-      hot.add(currentActive);
-    }
-    setHotSessions(hot);
-  }, []);
 
   // Listen for session events - event-driven, no polling
   useEffect(() => {
@@ -85,35 +27,24 @@ function TerminalPanel() {
 
         if (topic === "session.created") {
           const sid = payload.session_id as string;
-          setSessions(prev => {
-            const next = new Set(prev).add(sid);
-            lruRef.current.touch(sid);
-            // Defer hot session update to avoid state update in callback
-            setTimeout(() => updateHotSessions(next, sid), 0);
-            return next;
-          });
+          setSessions(prev => new Set(prev).add(sid));
           setActiveId(sid);
         } else if (topic === "session.closed") {
           const sid = payload.session_id as string;
           setSessions(prev => {
             const next = new Set(prev);
             next.delete(sid);
-            lruRef.current.remove(sid);
             return next;
           });
           setActiveId(current => current === sid ? null : current);
         } else if (topic === "session.active_changed") {
           const sid = payload.session_id as string;
           if (sid) {
-            lruRef.current.touch(sid);
             setActiveId(sid);
             setSessions(prev => {
               if (!prev.has(sid)) {
-                const next = new Set(prev).add(sid);
-                setTimeout(() => updateHotSessions(next, sid), 0);
-                return next;
+                return new Set(prev).add(sid);
               }
-              setTimeout(() => updateHotSessions(prev, sid), 0);
               return prev;
             });
           }
@@ -130,15 +61,11 @@ function TerminalPanel() {
       if (!mountedRef.current) return;
       const active = await invoke<string | null>("get_active_session");
       if (mountedRef.current && active) {
-        lruRef.current.touch(active);
         setActiveId(active);
         setSessions(prev => {
           if (!prev.has(active)) {
-            const next = new Set(prev).add(active);
-            updateHotSessions(next, active);
-            return next;
+            return new Set(prev).add(active);
           }
-          updateHotSessions(prev, active);
           return prev;
         });
       }
@@ -149,7 +76,7 @@ function TerminalPanel() {
       mountedRef.current = false;
       unsubs.forEach((u) => u());
     };
-  }, [updateHotSessions]);
+  }, []);
 
   // Emit activity event for inactivity tracking when user interacts
   const handleActivity = useCallback(() => {
@@ -165,8 +92,8 @@ function TerminalPanel() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          backgroundColor: "#1a1a2e",
-          color: "#666",
+          backgroundColor: "var(--terminal-bg, #1e1e1e)",
+          color: "var(--text-tertiary, #666)",
         }}
       >
         No active session
@@ -180,8 +107,7 @@ function TerminalPanel() {
       onKeyDown={handleActivity}
       onClick={handleActivity}
     >
-      {/* Only render hot terminals to save memory */}
-      {Array.from(sessions).filter(id => hotSessions.has(id)).map(sessionId => (
+      {Array.from(sessions).map(sessionId => (
         <div
           key={sessionId}
           style={{

@@ -2,12 +2,67 @@ use crate::ipc::AppState;
 use claude_tabs_core::hook_listener::HookListener;
 use claude_tabs_core::profile::{self, Profile, ProfileLaunchRequest};
 use claude_tabs_core::session::Session;
+use claude_tabs_core::state_machine::{SessionState, TransitionError};
 use claude_tabs_core::traits::provider::PtySize;
 use claude_tabs_platform_focus::{self as platform_focus, AttentionType};
-use claude_tabs_storage::{ClaudeSession, DirectoryPreference, SessionFilter, SessionMessage};
+use claude_tabs_pty::PtyError;
+use claude_tabs_storage::{ClaudeSession, DirectoryPreference, SessionFilter, SessionMessage, SessionMetadata, StorageError};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tracing::{debug, info};
+
+#[derive(Debug, thiserror::Error, Serialize)]
+pub enum CommandError {
+    #[error("Session not found: {0}")]
+    SessionNotFound(String),
+    #[error("PTY error: {0}")]
+    PtyError(String),
+    #[error("Storage error: {0}")]
+    StorageError(String),
+    #[error("Profile not found: {0}")]
+    ProfileNotFound(String),
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+    #[error("Platform error: {0}")]
+    PlatformError(String),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl From<PtyError> for CommandError {
+    fn from(e: PtyError) -> Self {
+        match e {
+            PtyError::NotFound(id) => CommandError::SessionNotFound(id),
+            other => CommandError::PtyError(other.to_string()),
+        }
+    }
+}
+
+impl From<StorageError> for CommandError {
+    fn from(e: StorageError) -> Self {
+        CommandError::StorageError(e.to_string())
+    }
+}
+
+impl From<TransitionError> for CommandError {
+    fn from(e: TransitionError) -> Self {
+        match e {
+            TransitionError::SessionNotFound(id) => CommandError::SessionNotFound(id),
+            TransitionError::InvalidTransition { from, to, trigger } => {
+                CommandError::InvalidState(format!(
+                    "Transition from '{}' to '{}' not allowed (trigger: {})", from, to, trigger
+                ))
+            }
+            other => CommandError::InvalidState(other.to_string()),
+        }
+    }
+}
+
+impl From<claude_tabs_platform_focus::FocusError> for CommandError {
+    fn from(e: claude_tabs_platform_focus::FocusError) -> Self {
+        CommandError::PlatformError(e.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -17,8 +72,11 @@ pub struct SessionInfo {
     pub title: String,
     pub working_directory: Option<String>,
     pub subtitle: Option<String>,
-    pub tags: Option<Vec<String>>,
     pub summary: Option<String>,
+    pub user_set_title: bool,
+    pub generated_title: Option<String>,
+    pub hidden: bool,
+    pub previous_session_id: Option<String>,
 }
 
 impl From<&Session> for SessionInfo {
@@ -26,7 +84,7 @@ impl From<&Session> for SessionInfo {
         Self {
             id: session.id.clone(),
             provider_id: session.provider_id.clone(),
-            state: session.state.clone(),
+            state: session.state.as_str().to_string(),
             title: session.title.clone(),
             working_directory: session.working_directory.clone(),
             subtitle: session
@@ -34,15 +92,15 @@ impl From<&Session> for SessionInfo {
                 .get("subtitle")
                 .and_then(|v| v.as_str())
                 .map(String::from),
-            tags: session.metadata.get("tags").and_then(|v| {
-                v.as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            }),
             summary: session
                 .metadata
                 .get("summary")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            user_set_title: false,
+            generated_title: None,
+            hidden: false,
+            previous_session_id: None,
         }
     }
 }
@@ -65,7 +123,7 @@ pub struct CreateSessionRequest {
 pub async fn create_session(
     state: State<'_, AppState>,
     request: CreateSessionRequest,
-) -> Result<SessionInfo, String> {
+) -> Result<SessionInfo, CommandError> {
     info!(provider_id = %request.provider_id, "Creating session");
 
     let mut session = Session::new(&request.provider_id);
@@ -151,8 +209,7 @@ pub async fn create_session(
             request.working_directory.as_deref(),
             &env,
             size,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
 
     state.output_stream.start_reading(session_id.clone(), reader);
     state.session_store.add(session.clone()).await;
@@ -174,7 +231,7 @@ pub async fn create_session(
 pub async fn close_session(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     info!(session_id = %session_id, "Closing session");
 
     // Cleanup temp MCP config file if this session had one
@@ -183,7 +240,7 @@ pub async fn close_session(
     // Remove from store
     state.session_store.remove(&session_id).await;
 
-    state.pty_manager.close(&session_id).map_err(|e| e.to_string())?;
+    state.pty_manager.close(&session_id)?;
 
     let sessions = state.session_store.list().await;
     let new_active = sessions.first().map(|s| s.id.clone());
@@ -199,13 +256,13 @@ pub async fn close_session(
 }
 
 #[tauri::command]
-pub async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, String> {
+pub async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, CommandError> {
     let sessions = state.session_store.list().await;
     Ok(sessions.iter().map(SessionInfo::from).collect())
 }
 
 #[tauri::command]
-pub async fn get_active_session(state: State<'_, AppState>) -> Result<Option<String>, String> {
+pub async fn get_active_session(state: State<'_, AppState>) -> Result<Option<String>, CommandError> {
     Ok(state.session_store.get_active().await)
 }
 
@@ -213,7 +270,7 @@ pub async fn get_active_session(state: State<'_, AppState>) -> Result<Option<Str
 pub async fn set_active_session(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     debug!(session_id = %session_id, "Setting active session");
     state.session_store.set_active(Some(session_id.clone())).await;
 
@@ -224,19 +281,24 @@ pub async fn set_active_session(
     );
     state.event_bus.emit(active_event).await;
 
-    // If session is idle, transition to active on focus
+    // Only transition idle → active on focus. Don't touch running, your_turn, paused, or active sessions.
     if let Some(session) = state.session_store.get(&session_id).await {
-        if session.state == "idle" {
-            state.session_store.update_state(&session_id, "active").await;
-            let event = claude_tabs_core::Event::new(
-                "session.state_changed",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "from": "idle",
-                    "to": "active",
-                }),
-            );
-            state.event_bus.emit(event).await;
+        if session.state == SessionState::Idle {
+            if let Ok(transition) = state
+                .state_machine
+                .transition_session(&session_id, SessionState::Active, "user.focus")
+                .await
+            {
+                let event = claude_tabs_core::Event::new(
+                    "session.state_changed",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "from": transition.from.as_str(),
+                        "to": "active",
+                    }),
+                );
+                state.event_bus.emit(event).await;
+            }
         }
     }
 
@@ -248,15 +310,43 @@ pub async fn rename_session(
     state: State<'_, AppState>,
     session_id: String,
     title: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     info!(session_id = %session_id, title = %title, "Renaming session");
     let success = state.session_store.rename(&session_id, &title).await;
     if !success {
-        return Err("Session not found".to_string());
+        return Err(CommandError::SessionNotFound(session_id.clone()));
     }
+
+    // Persist custom title to DB if session has a claude_session_id
+    if let Some(session) = state.session_store.get(&session_id).await {
+        if let Some(claude_sid) = session.metadata.get("claude_session_id").and_then(|v| v.as_str()) {
+            let existing = state.storage.get_session_metadata(claude_sid).await.ok().flatten();
+            let meta = if let Some(mut m) = existing {
+                m.custom_title = Some(title.clone());
+                m.user_set_title = true;
+                m
+            } else {
+                SessionMetadata {
+                    claude_session_id: claude_sid.to_string(),
+                    project_path: session.working_directory.clone().unwrap_or_default(),
+                    custom_title: Some(title.clone()),
+                    user_set_title: true,
+                    generated_title: None,
+                    hidden: false,
+                    previous_session_id: None,
+                    last_known_state: None,
+                    last_state_change_at: None,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                }
+            };
+            let _ = state.storage.upsert_session_metadata(&meta).await;
+        }
+    }
+
     let event = claude_tabs_core::Event::new(
         "session.renamed",
-        serde_json::json!({ "session_id": session_id, "title": title }),
+        serde_json::json!({ "session_id": session_id, "title": title, "source": "user" }),
     );
     state.event_bus.emit(event).await;
     Ok(())
@@ -267,11 +357,11 @@ pub fn write_to_pty(
     state: State<'_, AppState>,
     session_id: String,
     data: Vec<u8>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     state
         .pty_manager
-        .write_data(&session_id, &data)
-        .map_err(|e| e.to_string())
+        .write_data(&session_id, &data)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -280,12 +370,12 @@ pub fn resize_pty(
     session_id: String,
     rows: u16,
     cols: u16,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let size = PtySize { rows, cols };
     state
         .pty_manager
-        .resize(&session_id, size)
-        .map_err(|e| e.to_string())
+        .resize(&session_id, size)?;
+    Ok(())
 }
 
 /// Submit user input to the PTY with a trailing newline.
@@ -295,19 +385,19 @@ pub fn submit_input(
     state: State<'_, AppState>,
     session_id: String,
     input: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let data = format!("{}\n", input);
     state
         .pty_manager
-        .write_data(&session_id, data.as_bytes())
-        .map_err(|e| e.to_string())
+        .write_data(&session_id, data.as_bytes())?;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn get_config_value(
     state: State<'_, AppState>,
     key: String,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<Option<serde_json::Value>, CommandError> {
     Ok(state.config.get(&key).await)
 }
 
@@ -316,7 +406,7 @@ pub async fn set_config_value(
     state: State<'_, AppState>,
     key: String,
     value: serde_json::Value,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     state
         .config
         .set_value(&key, value, claude_tabs_core::ConfigLayer::Runtime)
@@ -325,7 +415,7 @@ pub async fn set_config_value(
 }
 
 #[tauri::command]
-pub async fn setup_hooks() -> Result<String, String> {
+pub async fn setup_hooks() -> Result<String, CommandError> {
     HookListener::install_hooks();
     Ok("Hooks installed".to_string())
 }
@@ -338,40 +428,28 @@ pub async fn setup_hooks() -> Result<String, String> {
 pub async fn list_claude_sessions(
     state: State<'_, AppState>,
     filter: Option<SessionFilter>,
-) -> Result<Vec<ClaudeSession>, String> {
+) -> Result<Vec<ClaudeSession>, CommandError> {
     let filter = filter.unwrap_or(SessionFilter {
         limit: 100,
         ..Default::default()
     });
-    state
-        .storage
-        .list_sessions(filter)
-        .await
-        .map_err(|e| e.to_string())
+    Ok(state.storage.list_sessions(filter).await?)
 }
 
 #[tauri::command]
 pub async fn get_claude_session(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<Option<ClaudeSession>, String> {
-    state
-        .storage
-        .get_session(&session_id)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<Option<ClaudeSession>, CommandError> {
+    Ok(state.storage.get_session(&session_id).await?)
 }
 
 #[tauri::command]
 pub async fn get_session_content(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<Vec<SessionMessage>, String> {
-    state
-        .storage
-        .get_session_content(&session_id)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<Vec<SessionMessage>, CommandError> {
+    Ok(state.storage.get_session_content(&session_id).await?)
 }
 
 #[tauri::command]
@@ -381,9 +459,9 @@ pub async fn set_directory_preference(
     pinned: Option<bool>,
     hidden: Option<bool>,
     display_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     // Get existing preference or create new one
-    let prefs = state.storage.get_directory_preferences().await.map_err(|e| e.to_string())?;
+    let prefs = state.storage.get_directory_preferences().await?;
     let existing = prefs.iter().find(|p| p.project_path == project_path);
 
     let pref = DirectoryPreference {
@@ -393,55 +471,40 @@ pub async fn set_directory_preference(
         display_name: display_name.or_else(|| existing.and_then(|e| e.display_name.clone())),
     };
 
-    state
-        .storage
-        .set_directory_preference(pref)
-        .await
-        .map_err(|e| e.to_string())
+    Ok(state.storage.set_directory_preference(pref).await?)
 }
 
 #[tauri::command]
 pub async fn get_directory_preferences(
     state: State<'_, AppState>,
-) -> Result<Vec<DirectoryPreference>, String> {
-    state
-        .storage
-        .get_directory_preferences()
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<Vec<DirectoryPreference>, CommandError> {
+    Ok(state.storage.get_directory_preferences().await?)
 }
 
 #[tauri::command]
 pub async fn remove_directory_preference(
     state: State<'_, AppState>,
     project_path: String,
-) -> Result<(), String> {
-    state
-        .storage
-        .remove_directory_preference(&project_path)
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<(), CommandError> {
+    Ok(state.storage.remove_directory_preference(&project_path).await?)
 }
 
 #[tauri::command]
 pub async fn delete_history_session(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     info!(session_id = %session_id, "Deleting history session");
 
     // Get session to find the jsonl path
-    let session = state
-        .storage
-        .get_session(&session_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let session = state.storage.get_session(&session_id).await?;
 
     // Delete the file if it exists
     if let Some(s) = session {
         let path = std::path::Path::new(&s.jsonl_path);
         if path.exists() {
-            std::fs::remove_file(path).map_err(|e| e.to_string())?;
+            std::fs::remove_file(path)
+                .map_err(|e| CommandError::Internal(e.to_string()))?;
             info!(path = %s.jsonl_path, "Deleted session file");
         }
     }
@@ -453,7 +516,7 @@ pub async fn delete_history_session(
 pub async fn delete_project_sessions(
     state: State<'_, AppState>,
     project_path: String,
-) -> Result<u32, String> {
+) -> Result<u32, CommandError> {
     info!(project_path = %project_path, "Deleting all sessions for project");
 
     // Get all sessions for this project
@@ -462,11 +525,7 @@ pub async fn delete_project_sessions(
         limit: 10000,
         ..Default::default()
     };
-    let sessions = state
-        .storage
-        .list_sessions(filter)
-        .await
-        .map_err(|e| e.to_string())?;
+    let sessions = state.storage.list_sessions(filter).await?;
 
     let mut deleted_count = 0u32;
     for session in &sessions {
@@ -489,26 +548,21 @@ pub async fn delete_project_sessions(
 pub async fn resume_session(
     state: State<'_, AppState>,
     claude_session_id: String,
-) -> Result<SessionInfo, String> {
-    // Look up the session to get project path
+) -> Result<SessionInfo, CommandError> {
     let session = state
         .storage
         .get_session(&claude_session_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Session not found".to_string())?;
+        .await?
+        .ok_or_else(|| CommandError::SessionNotFound(claude_session_id.clone()))?;
 
-    // Use summary (Claude's auto-title) or first_prompt for display
-    let title = session
-        .summary
-        .clone()
-        .or_else(|| session.first_prompt.clone())
-        .or_else(|| Some(format!("Session {}", &claude_session_id[..8])));
+    let title = session.first_prompt.as_deref()
+        .map(|p| if p.len() > 80 { format!("{}...", &p[..77]) } else { p.to_string() })
+        .unwrap_or_else(|| format!("Session {}", &claude_session_id[..8.min(claude_session_id.len())]));
 
     let request = CreateSessionRequest {
         provider_id: "claude-code".to_string(),
         working_directory: Some(session.project_path.clone()),
-        title,
+        title: Some(title),
         resume_claude_session_id: Some(claude_session_id.clone()),
         fork: None,
         initial_prompt: None,
@@ -520,7 +574,6 @@ pub async fn resume_session(
 
     let result = create_session(state.clone(), request).await?;
 
-    // Store the claude_session_id so the session can be resumed again
     state
         .session_store
         .set_metadata(
@@ -537,21 +590,16 @@ pub async fn resume_session(
 pub async fn fork_session(
     state: State<'_, AppState>,
     claude_session_id: String,
-) -> Result<SessionInfo, String> {
+) -> Result<SessionInfo, CommandError> {
     let session = state
         .storage
         .get_session(&claude_session_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Session not found".to_string())?;
+        .await?
+        .ok_or_else(|| CommandError::SessionNotFound(claude_session_id.clone()))?;
 
-    // Use summary (Claude's auto-title) or first_prompt for display
-    let fallback = format!("Session {}", &claude_session_id[..8]);
-    let base_title = session
-        .summary
-        .as_deref()
-        .or(session.first_prompt.as_deref())
-        .unwrap_or(&fallback);
+    let base_title = session.first_prompt.as_deref()
+        .map(|p| if p.len() > 80 { format!("{}...", &p[..77]) } else { p.to_string() })
+        .unwrap_or_else(|| format!("Session {}", &claude_session_id[..8.min(claude_session_id.len())]));
     let title = format!("{} (fork)", base_title);
 
     let request = CreateSessionRequest {
@@ -574,13 +622,13 @@ pub async fn fork_session(
 pub async fn fork_active_session(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<SessionInfo, String> {
+) -> Result<SessionInfo, CommandError> {
     let session = state.session_store.get(&session_id).await
-        .ok_or_else(|| "Session not found".to_string())?;
+        .ok_or_else(|| CommandError::SessionNotFound(session_id.clone()))?;
     let claude_session_id = session.metadata
         .get("claude_session_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "No Claude session ID available for fork".to_string())?
+        .ok_or_else(|| CommandError::Internal("No Claude session ID available for fork".to_string()))?
         .to_string();
     let title = format!("{} (fork)", session.title);
     let request = CreateSessionRequest {
@@ -601,7 +649,7 @@ pub async fn fork_active_session(
 // --- Profile commands ---
 
 #[tauri::command]
-pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
+pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, CommandError> {
     Ok(state.profile_store.list().await)
 }
 
@@ -609,40 +657,40 @@ pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, S
 pub async fn get_profile(
     state: State<'_, AppState>,
     profile_id: String,
-) -> Result<Profile, String> {
+) -> Result<Profile, CommandError> {
     state
         .profile_store
         .get(&profile_id)
         .await
-        .ok_or_else(|| format!("Profile not found: {}", profile_id))
+        .ok_or_else(|| CommandError::ProfileNotFound(profile_id))
 }
 
 #[tauri::command]
 pub async fn save_profile(
     state: State<'_, AppState>,
     profile: Profile,
-) -> Result<(), String> {
-    state.profile_store.save(profile).await
+) -> Result<(), CommandError> {
+    state.profile_store.save(profile).await.map_err(|e| CommandError::Internal(e))
 }
 
 #[tauri::command]
 pub async fn delete_profile(
     state: State<'_, AppState>,
     profile_id: String,
-) -> Result<(), String> {
-    state.profile_store.delete(&profile_id).await
+) -> Result<(), CommandError> {
+    state.profile_store.delete(&profile_id).await.map_err(|e| CommandError::Internal(e))
 }
 
 #[tauri::command]
 pub async fn launch_profile(
     state: State<'_, AppState>,
     request: ProfileLaunchRequest,
-) -> Result<SessionInfo, String> {
+) -> Result<SessionInfo, CommandError> {
     let profile = state
         .profile_store
         .get(&request.profile_id)
         .await
-        .ok_or_else(|| format!("Profile not found: {}", request.profile_id))?;
+        .ok_or_else(|| CommandError::ProfileNotFound(request.profile_id.clone()))?;
 
     // Resolve working directory
     let working_directory = match &profile.working_directory {
@@ -663,7 +711,8 @@ pub async fn launch_profile(
     let mcp_config_path = if let Some(ref mcp) = profile.mcp_servers {
         state
             .profile_store
-            .write_temp_mcp_config(&session_id_for_mcp, mcp)?
+            .write_temp_mcp_config(&session_id_for_mcp, mcp)
+            .map_err(|e| CommandError::Internal(e))?
             .map(|p| p.to_string_lossy().to_string())
     } else {
         None
@@ -706,9 +755,9 @@ pub async fn launch_profile(
 /// Focus the application window using native platform APIs.
 /// This bypasses Tauri's buggy setFocus() on macOS.
 #[tauri::command]
-pub fn focus_window() -> Result<(), String> {
+pub fn focus_window() -> Result<(), CommandError> {
     debug!("focus_window command called");
-    platform_focus::focus_window().map_err(|e| e.to_string())
+    Ok(platform_focus::focus_window()?)
 }
 
 /// Request user attention (dock bounce on macOS, taskbar flash on Windows).
@@ -716,20 +765,20 @@ pub fn focus_window() -> Result<(), String> {
 /// # Arguments
 /// * `critical` - If true, uses critical/persistent attention. If false, uses informational/brief.
 #[tauri::command]
-pub fn request_attention(critical: bool) -> Result<(), String> {
+pub fn request_attention(critical: bool) -> Result<(), CommandError> {
     debug!(critical = critical, "request_attention command called");
     let attention_type = if critical {
         AttentionType::Critical
     } else {
         AttentionType::Informational
     };
-    platform_focus::request_attention(attention_type).map_err(|e| e.to_string())
+    Ok(platform_focus::request_attention(attention_type)?)
 }
 
 /// Check if the application is currently the frontmost/active app.
 #[tauri::command]
-pub fn is_app_active() -> Result<bool, String> {
-    platform_focus::is_app_active().map_err(|e| e.to_string())
+pub fn is_app_active() -> Result<bool, CommandError> {
+    Ok(platform_focus::is_app_active()?)
 }
 
 /// Manually set a session's state.
@@ -739,38 +788,69 @@ pub async fn set_session_state(
     state: State<'_, AppState>,
     session_id: String,
     new_state: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     info!(session_id = %session_id, new_state = %new_state, "Manually setting session state");
 
-    let session = state
-        .session_store
-        .get(&session_id)
-        .await
-        .ok_or_else(|| "Session not found".to_string())?;
+    let target: SessionState = serde_json::from_value(serde_json::Value::String(new_state.clone()))
+        .map_err(|_| CommandError::InvalidState(format!("Unknown state: {}", new_state)))?;
 
-    let from = session.state.clone();
-    if from == new_state {
-        return Ok(());
-    }
-
-    // Validate the state is one of our known states
-    let valid_states = ["idle", "active", "running", "your_turn"];
-    if !valid_states.contains(&new_state.as_str()) {
-        return Err(format!("Invalid state: {}. Valid states: {:?}", new_state, valid_states));
-    }
-
-    state.session_store.update_state(&session_id, &new_state).await;
+    let transition = state
+        .state_machine
+        .transition_session(&session_id, target, "manual")
+        .await?;
 
     let event = claude_tabs_core::Event::new(
         "session.state_changed",
         serde_json::json!({
             "session_id": session_id,
-            "from": from,
-            "to": new_state,
+            "from": transition.from.as_str(),
+            "to": target.as_str(),
             "manual": true,
         }),
     );
     state.event_bus.emit(event).await;
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn set_session_hidden(
+    state: State<'_, AppState>,
+    session_id: String,
+    hidden: bool,
+) -> Result<(), CommandError> {
+    state.storage.set_session_hidden(&session_id, hidden).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_session_chain(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<SessionMetadata>, CommandError> {
+    Ok(state.storage.get_session_chain(&session_id).await?)
+}
+
+#[tauri::command]
+pub async fn trigger_title_generation(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<String>, CommandError> {
+    // Check if user already set title
+    let meta = state.storage.get_session_metadata(&session_id).await?;
+    if let Some(ref m) = meta {
+        if m.user_set_title { return Ok(None); }
+        if m.generated_title.is_some() { return Ok(m.generated_title.clone()); }
+    }
+
+    // Get messages and check count >= 2
+    let messages = state.storage.get_session_content(&session_id).await?;
+    let user_msgs: Vec<_> = messages.iter().filter(|m| m.message_type == "user").collect();
+    if user_msgs.len() < 2 { return Ok(None); }
+
+    // Build prompt (actual API call would go here in the future)
+    let prompt = claude_tabs_core::generate_title_prompt(&messages);
+    // For now, just return the prompt - actual Haiku call TBD
+    let _ = prompt;
+    Ok(None)
 }

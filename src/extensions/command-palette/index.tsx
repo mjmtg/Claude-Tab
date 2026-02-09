@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { FrontendExtension } from "../../types/extension";
 import { SessionInfo } from "../../types/session";
 import { SLOTS } from "../../types/slots";
-import { Keybinding } from "../../kernel/KeybindingManager";
+import type { KeybindingDefinition } from "../../types/kernel";
 import { invoke } from "@tauri-apps/api/core";
 
 type PaletteItem =
   | { type: "tab"; id: string; label: string; detail?: string; provider_id: string; isActive: boolean }
   | { type: "command"; id: string; label: string; keys: string; handler: () => void };
 
-let paletteCommands: Keybinding[] = [];
+let paletteCommands: KeybindingDefinition[] = [];
 let showPalette = false;
 let paletteListeners: Array<() => void> = [];
 
@@ -36,18 +36,23 @@ function CommandPalette() {
 
   useEffect(() => {
     const update = () => {
+      const wasVisible = visible;
       setVisible(showPalette);
       if (showPalette) {
         setQuery("");
         setSelected(0);
         setTimeout(() => inputRef.current?.focus(), 0);
+      } else if (wasVisible) {
+        // Return focus to terminal when palette closes
+        const terminal = document.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement;
+        if (terminal) terminal.focus();
       }
     };
     paletteListeners.push(update);
     return () => {
       paletteListeners = paletteListeners.filter((l) => l !== update);
     };
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
     if (visible) {
@@ -126,8 +131,18 @@ function CommandPalette() {
   if (!visible) return null;
 
   return (
-    <div className="command-palette-backdrop" onClick={() => { showPalette = false; notifyPalette(); }}>
-      <div className="command-palette" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="command-palette-backdrop"
+      onClick={() => { showPalette = false; notifyPalette(); }}
+      role="presentation"
+    >
+      <div
+        className="command-palette"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label="Command palette"
+        aria-modal="true"
+      >
         <input
           ref={inputRef}
           className="command-palette-input"
@@ -135,13 +150,21 @@ function CommandPalette() {
           value={query}
           onChange={(e) => { setQuery(e.target.value); setSelected(0); }}
           onKeyDown={handleKeyDown}
+          role="combobox"
+          aria-expanded={items.length > 0}
+          aria-controls="command-palette-listbox"
+          aria-activedescendant={items[selected] ? `palette-item-${items[selected].id}` : undefined}
+          aria-autocomplete="list"
         />
-        <div className="command-palette-list">
+        <div className="command-palette-list" id="command-palette-listbox" role="listbox">
           {items.map((item, i) => (
             <div
               key={item.id}
+              id={`palette-item-${item.id}`}
               className={`command-palette-item ${i === selected ? "selected" : ""}`}
               onClick={() => execute(item)}
+              role="option"
+              aria-selected={i === selected}
             >
               {item.type === "tab" ? (
                 <>
@@ -163,7 +186,7 @@ function CommandPalette() {
             </div>
           ))}
           {items.length === 0 && (
-            <div className="command-palette-empty">No results found</div>
+            <div className="command-palette-empty" role="status">No results found</div>
           )}
         </div>
       </div>

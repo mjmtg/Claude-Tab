@@ -105,7 +105,7 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
         <span className="profiles-title">
           {profile ? "Edit Profile" : "New Profile"}
         </span>
-        <button className="profiles-close" onClick={onClose}>
+        <button className="profiles-close" onClick={onClose} aria-label="Close editor">
           &times;
         </button>
       </div>

@@ -52,10 +52,15 @@ export interface ScanResult {
   projects_scanned: number;
 }
 
-export interface SessionMessage {
-  type: string;
+export interface MessagePayload {
   role?: string;
   content?: unknown;
+  model?: string;
+}
+
+export interface SessionMessage {
+  type: string;
+  message?: MessagePayload;
   timestamp?: string;
   cwd?: string;
   gitBranch?: string;
@@ -170,6 +175,19 @@ export interface IBackendService {
 
   /** Launch a profile as a new session */
   launchProfile(request: ProfileLaunchRequest): Promise<SessionInfo>;
+
+  // -------------------------------------------------------------------------
+  // Session Metadata
+  // -------------------------------------------------------------------------
+
+  /** Set session hidden state */
+  setSessionHidden(sessionId: string, hidden: boolean): Promise<void>;
+
+  /** Get the chain of sessions (previous_session_id links) */
+  getSessionChain(sessionId: string): Promise<SessionInfo[]>;
+
+  /** Trigger title generation for a session */
+  triggerTitleGeneration(sessionId: string): Promise<void>;
 }
 
 // ============================================================================

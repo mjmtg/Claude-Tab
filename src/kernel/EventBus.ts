@@ -167,6 +167,7 @@ export class EventBus implements IEventBus {
     }
     this.tauriUnlisteners = [];
     this.handlers.clear();
+    this.middleware = [];
     this.topicIndex = new TopicIndex();
   }
 }

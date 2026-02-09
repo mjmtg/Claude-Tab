@@ -6,7 +6,7 @@ type RegistryListener = () => void;
 
 export class ComponentRegistry implements IComponentRegistry {
   private slots = new Map<string, SlotComponent[]>();
-  private listeners: RegistryListener[] = [];
+  private listeners = new Set<RegistryListener>();
 
   register(slot: SlotName, component: SlotComponent): void {
     const existing = this.slots.get(slot) ?? [];
@@ -30,15 +30,19 @@ export class ComponentRegistry implements IComponentRegistry {
   }
 
   subscribe(listener: RegistryListener): () => void {
-    this.listeners.push(listener);
+    this.listeners.add(listener);
     return () => {
-      this.listeners = this.listeners.filter((l) => l !== listener);
+      this.listeners.delete(listener);
     };
   }
 
   private notify(): void {
     for (const listener of this.listeners) {
-      listener();
+      try {
+        listener();
+      } catch (err) {
+        console.error("[ComponentRegistry] Listener error:", err);
+      }
     }
   }
 }

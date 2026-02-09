@@ -210,7 +210,7 @@ fn load_profile_file(path: &Path) -> Result<Profile, String> {
 fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .expect("HOME environment variable must be set")
 }
 
 pub fn cleanup_temp_mcp_config(session_id: &str) {

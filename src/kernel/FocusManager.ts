@@ -66,9 +66,12 @@ export class FocusManager implements IFocusManager {
 
   /**
    * Record user activity, resetting the inactivity timer.
+   * Throttled to avoid excessive notifications on every keystroke.
    */
   recordActivity(): void {
-    this.updateState({ lastActivityTime: Date.now() });
+    const now = Date.now();
+    if (now - this._state.lastActivityTime < 500) return;
+    this.updateState({ lastActivityTime: now });
   }
 
   /**

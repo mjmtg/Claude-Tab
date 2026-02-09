@@ -32,19 +32,24 @@ export function ProfilesPanel() {
 
   useEffect(() => {
     const update = () => {
+      const wasVisible = visible;
       setVisible(showProfiles);
       if (showProfiles) {
         loadProfiles();
         setExpandedId(null);
         setShowEditor(false);
         setEditingProfile(null);
+      } else if (wasVisible) {
+        // Return focus to terminal when profiles closes
+        const terminal = document.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement;
+        if (terminal) terminal.focus();
       }
     };
     profilesListeners.push(update);
     return () => {
       profilesListeners = profilesListeners.filter((l) => l !== update);
     };
-  }, []);
+  }, [visible]);
 
   const loadProfiles = useCallback(async () => {
     try {
@@ -182,8 +187,8 @@ export function ProfilesPanel() {
 
   if (showEditor) {
     return (
-      <div className="profiles-backdrop" onClick={close}>
-        <div className="profiles-panel profiles-panel-wide" onClick={(e) => e.stopPropagation()}>
+      <div className="profiles-backdrop" onClick={close} role="presentation">
+        <div className="profiles-panel profiles-panel-wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Edit profile" aria-modal="true">
           <ProfileEditor
             profile={editingProfile}
             onSave={handleEditorSave}
@@ -195,11 +200,11 @@ export function ProfilesPanel() {
   }
 
   return (
-    <div className="profiles-backdrop" onClick={close}>
-      <div className="profiles-panel" onClick={(e) => e.stopPropagation()}>
+    <div className="profiles-backdrop" onClick={close} role="presentation">
+      <div className="profiles-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Profiles" aria-modal="true">
         <div className="profiles-header">
           <span className="profiles-title">Profiles</span>
-          <button className="profiles-close" onClick={close}>
+          <button className="profiles-close" onClick={close} aria-label="Close profiles">
             &times;
           </button>
         </div>

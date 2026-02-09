@@ -3,13 +3,13 @@ use claude_tabs_core::event_bus::EventBus;
 use claude_tabs_core::hook_listener::HookListener;
 use claude_tabs_core::profile::ProfileStore;
 use claude_tabs_core::session::SessionStore;
-use claude_tabs_core::state_machine::StateRegistry;
+use claude_tabs_core::state_machine::{SessionState, StateMachine};
 use claude_tabs_pty::{OutputStream, PtyManager};
-use claude_tabs_storage::SqliteBackend;
+use claude_tabs_storage::{SessionScanner, SqliteBackend};
 use claude_tabs_tauri_bridge::commands;
 use claude_tabs_tauri_bridge::ipc::{AppState, IpcBridge};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -27,7 +27,7 @@ pub fn run() {
     let session_store = Arc::new(SessionStore::new());
     let pty_manager = Arc::new(PtyManager::new());
     let output_stream = Arc::new(OutputStream::new(512));
-    let state_registry = Arc::new(StateRegistry::new());
+    let state_machine = Arc::new(StateMachine::new(session_store.clone()));
 
     let storage: Arc<dyn claude_tabs_storage::StorageBackend> =
         match SqliteBackend::new("~/.claude-tabs/archive.db") {
@@ -37,6 +37,7 @@ pub fn run() {
             }
         };
 
+    let scanner = Arc::new(SessionScanner::new().expect("HOME environment variable must be set"));
     let profile_store = Arc::new(ProfileStore::new());
 
     let app_state = AppState {
@@ -47,6 +48,8 @@ pub fn run() {
         output_stream: output_stream.clone(),
         storage: storage.clone(),
         profile_store: profile_store.clone(),
+        state_machine: state_machine.clone(),
+        scanner: scanner.clone(),
     };
 
     tauri::Builder::default()
@@ -89,6 +92,9 @@ pub fn run() {
             commands::is_app_active,
             // Session state management
             commands::set_session_state,
+            commands::set_session_hidden,
+            commands::get_session_chain,
+            commands::trigger_title_generation,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -96,22 +102,21 @@ pub fn run() {
             let eb = event_bus.clone();
             let os = output_stream.clone();
             let ss = session_store.clone();
-            let sr = state_registry.clone();
 
             let ps = profile_store.clone();
             tauri::async_runtime::spawn(async move {
-                sr.register_core_states().await;
                 ps.init().await;
-                info!("Core states registered, profiles loaded");
+                info!("Profiles loaded");
             });
 
             let bridge = IpcBridge::new(app_handle, os.clone(), eb.clone());
             bridge.start_forwarding();
 
+            let sm_hook = state_machine.clone();
             let ss_hook = ss.clone();
             let eb_hook = eb.clone();
             tauri::async_runtime::spawn(async move {
-                HookListener::start(ss_hook, eb_hook, None);
+                HookListener::start(sm_hook, ss_hook, eb_hook, None);
                 info!("Hook listener started");
             });
 
@@ -124,7 +129,7 @@ pub fn run() {
             });
             info!("Directory tracker started");
 
-            // PTY exit handler: remove session when process exits
+            // PTY exit handler: close PTY and remove session
             {
                 let mut exit_receiver = os.subscribe();
                 let ss_exit = ss.clone();
@@ -156,6 +161,233 @@ pub fn run() {
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+
+            // Title sync background task: generate titles from JSONL first prompt
+            {
+                let ss_title = ss.clone();
+                let eb_title = eb.clone();
+                let scanner_title = Arc::new(SessionScanner::new().expect("HOME environment variable must be set"));
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+                        let sessions = ss_title.list().await;
+                        for session in &sessions {
+                            // Skip user-renamed sessions
+                            let is_user_set = session.metadata.get("user_set_title")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if is_user_set {
+                                continue;
+                            }
+
+                            // Skip if already titled from JSONL
+                            let has_jsonl_title = session.metadata.get("jsonl_title")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if has_jsonl_title {
+                                continue;
+                            }
+
+                            let claude_sid = match session.metadata.get("claude_session_id")
+                                .and_then(|v| v.as_str())
+                            {
+                                Some(id) => id.to_string(),
+                                None => continue,
+                            };
+
+                            // Extract first user prompt from JSONL
+                            if let Some(prompt) = scanner_title.extract_first_prompt(&claude_sid) {
+                                let new_title = if prompt.len() > 80 {
+                                    let truncated: String = prompt.chars().take(77).collect();
+                                    format!("{}...", truncated)
+                                } else {
+                                    prompt
+                                };
+
+                                if new_title != session.title {
+                                    ss_title.rename(&session.id, &new_title).await;
+                                    ss_title.set_metadata(
+                                        &session.id,
+                                        "jsonl_title",
+                                        serde_json::Value::Bool(true),
+                                    ).await;
+
+                                    let event = claude_tabs_core::Event::new(
+                                        "session.renamed",
+                                        serde_json::json!({
+                                            "session_id": session.id,
+                                            "title": new_title,
+                                            "source": "jsonl_prompt",
+                                        }),
+                                    );
+                                    eb_title.emit(event).await;
+                                    debug!(session_id = %session.id, title = %new_title, "Title set from JSONL first prompt");
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Session recording: listen for hook.SessionStart to immediately persist to DB
+            {
+                let mut hook_receiver = eb.receiver();
+                let ss_record = ss.clone();
+                let storage_record = storage.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        match hook_receiver.recv().await {
+                            Ok(event) => {
+                                if event.topic != "hook.SessionStart" {
+                                    continue;
+                                }
+                                let session_id = event.payload.get("session_id")
+                                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let claude_sid = event.payload.get("claude_session_id")
+                                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                if claude_sid.is_empty() { continue; }
+
+                                // Check if already recorded
+                                if let Ok(Some(_)) = storage_record.get_session_metadata(&claude_sid).await {
+                                    continue;
+                                }
+
+                                // Get session info from in-memory store
+                                let (project_path, title) = if let Some(s) = ss_record.get(&session_id).await {
+                                    (s.working_directory.clone().unwrap_or_default(), s.title.clone())
+                                } else {
+                                    (String::new(), String::new())
+                                };
+
+                                let meta = claude_tabs_storage::SessionMetadata {
+                                    claude_session_id: claude_sid.clone(),
+                                    project_path,
+                                    custom_title: if title.is_empty() { None } else { Some(title) },
+                                    user_set_title: false,
+                                    generated_title: None,
+                                    hidden: false,
+                                    previous_session_id: None,
+                                    last_known_state: Some("active".to_string()),
+                                    last_state_change_at: None,
+                                    created_at: String::new(),
+                                    updated_at: String::new(),
+                                };
+                                let _ = storage_record.upsert_session_metadata(&meta).await;
+                                info!(claude_session_id = %claude_sid, "Session recorded in DB");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+
+            // State reconciliation task: verify PTY liveness, persist state, detect interrupts
+            {
+                let ss_recon = ss.clone();
+                let eb_recon = eb.clone();
+                let sm_recon = state_machine.clone();
+                let pm_recon = pty_manager.clone();
+                let storage_recon = storage.clone();
+                let scanner_recon = Arc::new(SessionScanner::new().expect("HOME environment variable must be set"));
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+                        let sessions = ss_recon.list().await;
+                        for session in &sessions {
+                            // Interrupt detection: check JSONL for Running sessions
+                            if session.state == SessionState::Running {
+                                if let Some(claude_sid) = session.metadata.get("claude_session_id")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if scanner_recon.is_session_interrupted(claude_sid) {
+                                        match sm_recon
+                                            .transition_session(&session.id, SessionState::Paused, "jsonl.interrupted")
+                                            .await
+                                        {
+                                            Ok(transition) => {
+                                                let event = claude_tabs_core::Event::new(
+                                                    "session.state_changed",
+                                                    serde_json::json!({
+                                                        "session_id": session.id,
+                                                        "from": transition.from.as_str(),
+                                                        "to": "paused",
+                                                    }),
+                                                );
+                                                eb_recon.emit(event).await;
+                                                info!(session_id = %session.id, "Detected interrupt from JSONL");
+                                            }
+                                            Err(e) => {
+                                                debug!(session_id = %session.id, error = %e, "Interrupt transition skipped");
+                                            }
+                                        }
+                                        continue; // Skip further checks for this session
+                                    }
+                                }
+                            }
+
+                            // Check PTY liveness
+                            if !pm_recon.is_alive(&session.id)
+                                && matches!(session.state, SessionState::Running | SessionState::YourTurn | SessionState::Paused)
+                            {
+                                match sm_recon
+                                    .transition_session(&session.id, SessionState::Idle, "reconciliation.pty_dead")
+                                    .await
+                                {
+                                    Ok(transition) => {
+                                        let event = claude_tabs_core::Event::new(
+                                            "session.state_changed",
+                                            serde_json::json!({
+                                                "session_id": session.id,
+                                                "from": transition.from.as_str(),
+                                                "to": "idle",
+                                            }),
+                                        );
+                                        eb_recon.emit(event).await;
+                                        warn!(
+                                            session_id = %session.id,
+                                            from = %transition.from,
+                                            "Reconciled dead PTY: forced to idle"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        debug!(session_id = %session.id, error = %e, "Reconciliation transition skipped");
+                                    }
+                                }
+                            }
+
+                            // Persist state to DB for sessions with claude_session_id
+                            if let Some(claude_sid) = session.metadata.get("claude_session_id")
+                                .and_then(|v| v.as_str())
+                            {
+                                let existing = storage_recon.get_session_metadata(claude_sid).await.ok().flatten();
+                                let meta = if let Some(mut m) = existing {
+                                    m.last_known_state = Some(session.state.as_str().to_string());
+                                    m
+                                } else {
+                                    // Create record if it doesn't exist yet
+                                    claude_tabs_storage::SessionMetadata {
+                                        claude_session_id: claude_sid.to_string(),
+                                        project_path: session.working_directory.clone().unwrap_or_default(),
+                                        custom_title: Some(session.title.clone()),
+                                        user_set_title: false,
+                                        generated_title: None,
+                                        hidden: false,
+                                        previous_session_id: None,
+                                        last_known_state: Some(session.state.as_str().to_string()),
+                                        last_state_change_at: None,
+                                        created_at: String::new(),
+                                        updated_at: String::new(),
+                                    }
+                                };
+                                let _ = storage_recon.upsert_session_metadata(&meta).await;
+                            }
                         }
                     }
                 });

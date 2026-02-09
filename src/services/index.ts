@@ -13,6 +13,7 @@ export type {
   SessionFilter,
   DirectoryPreference,
   ScanResult,
+  MessagePayload,
   SessionMessage,
   UnlistenFn,
   CoreEventHandler,

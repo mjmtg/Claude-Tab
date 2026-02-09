@@ -1,9 +1,9 @@
 //! Session Scanner
 //!
-//! Reads Claude Code sessions directly from ~/.claude/projects/*/sessions-index.json files.
+//! Reads Claude Code sessions directly from JSONL files in ~/.claude/projects/.
 
 use crate::models::ClaudeSession;
-use chrono::Utc;
+use crate::reader::SessionReader;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -15,11 +15,12 @@ pub struct SessionScanner {
 
 impl SessionScanner {
     /// Create a new scanner with the default Claude directory (~/.claude).
-    pub fn new() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        Self {
+    pub fn new() -> Result<Self, String> {
+        let home = std::env::var("HOME")
+            .map_err(|_| "HOME environment variable not set".to_string())?;
+        Ok(Self {
             claude_dir: PathBuf::from(home).join(".claude"),
-        }
+        })
     }
 
     /// Create a scanner with a custom Claude directory (for testing).
@@ -32,7 +33,7 @@ impl SessionScanner {
         self.claude_dir.join("projects")
     }
 
-    /// Read all sessions from all projects' sessions-index.json files.
+    /// Read all sessions by scanning JSONL files across all projects.
     pub fn list_all_sessions(&self) -> Vec<ClaudeSession> {
         let projects_dir = self.projects_dir();
         if !projects_dir.exists() {
@@ -46,11 +47,7 @@ impl SessionScanner {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
-                        let encoded_path = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_string();
-                        sessions.extend(self.read_project_sessions(&encoded_path));
+                        sessions.extend(Self::scan_project_dir(&path));
                     }
                 }
             }
@@ -64,100 +61,59 @@ impl SessionScanner {
         sessions
     }
 
-    /// Read sessions from a specific project's sessions-index.json.
-    fn read_project_sessions(&self, encoded_path: &str) -> Vec<ClaudeSession> {
-        let project_dir = self.projects_dir().join(encoded_path);
-        let index_path = project_dir.join("sessions-index.json");
-
-        if !index_path.exists() {
-            return Vec::new();
-        }
-
-        let project_path = decode_path(encoded_path);
-        self.parse_sessions_index(&index_path, &project_path, encoded_path)
-            .unwrap_or_default()
-    }
-
-    /// Parse sessions-index.json file.
-    fn parse_sessions_index(
-        &self,
-        index_path: &Path,
-        project_path: &str,
-        encoded_path: &str,
-    ) -> Option<Vec<ClaudeSession>> {
-        let content = fs::read_to_string(index_path).ok()?;
-        let index: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-        // sessions-index.json has format: { "version": 1, "entries": [...] }
-        let entries = index.get("entries")?.as_array()?;
+    /// Scan a project directory for JSONL session files (skip subagents/).
+    fn scan_project_dir(project_dir: &Path) -> Vec<ClaudeSession> {
+        let entries = match fs::read_dir(project_dir) {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
 
         let mut sessions = Vec::new();
-        let now = Utc::now().to_rfc3339();
-
-        for entry in entries {
-            let session_id = entry.get("sessionId")?.as_str()?;
-
-            // Use fullPath from index if available, otherwise construct it
-            let jsonl_path = entry.get("fullPath")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    self.projects_dir()
-                        .join(encoded_path)
-                        .join(format!("{}.jsonl", session_id))
-                });
-
-            if !jsonl_path.exists() {
-                continue;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") && path.is_file() {
+                if let Some(session) = SessionReader::read_session_metadata(&path) {
+                    sessions.push(session);
+                }
             }
-
-            // Get git branch from index (it's camelCase: gitBranch)
-            let git_branch = entry.get("gitBranch")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-
-            // Use projectPath from index if available
-            let actual_project_path = entry.get("projectPath")
-                .and_then(|v| v.as_str())
-                .unwrap_or(project_path);
-
-            sessions.push(ClaudeSession {
-                session_id: session_id.to_string(),
-                project_path: actual_project_path.to_string(),
-                jsonl_path: jsonl_path.to_string_lossy().to_string(),
-                first_prompt: entry.get("firstPrompt").and_then(|v| v.as_str()).map(String::from),
-                summary: entry.get("summary").and_then(|v| v.as_str()).map(String::from),
-                message_count: entry.get("messageCount").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                created_at: entry.get("created").and_then(|v| v.as_str()).unwrap_or(&now).to_string(),
-                modified_at: entry.get("modified").and_then(|v| v.as_str()).unwrap_or(&now).to_string(),
-                git_branch,
-            });
         }
+        sessions
+    }
 
-        Some(sessions)
+    /// Check if a session's last message is an interruption.
+    pub fn is_session_interrupted(&self, session_id: &str) -> bool {
+        self.find_jsonl(session_id)
+            .map(|path| SessionReader::is_interrupted(&path))
+            .unwrap_or(false)
+    }
+
+    /// Extract the first user prompt from a session's JSONL file.
+    pub fn extract_first_prompt(&self, session_id: &str) -> Option<String> {
+        self.find_jsonl(session_id)
+            .and_then(|path| SessionReader::extract_first_prompt(&path))
     }
 
     /// Find a session by ID across all projects.
     pub fn find_session(&self, session_id: &str) -> Option<ClaudeSession> {
+        let path = self.find_jsonl(session_id)?;
+        SessionReader::read_session_metadata(&path)
+    }
+
+    /// Find the JSONL file for a session by scanning project directories.
+    fn find_jsonl(&self, session_id: &str) -> Option<PathBuf> {
         let projects_dir = self.projects_dir();
         if !projects_dir.exists() {
             return None;
         }
 
-        if let Ok(entries) = fs::read_dir(&projects_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let encoded_path = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
+        let filename = format!("{}.jsonl", session_id);
 
-                    let sessions = self.read_project_sessions(&encoded_path);
-                    if let Some(session) = sessions.into_iter().find(|s| s.session_id == session_id) {
-                        return Some(session);
-                    }
+        for entry in fs::read_dir(&projects_dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let jsonl_path = path.join(&filename);
+                if jsonl_path.exists() {
+                    return Some(jsonl_path);
                 }
             }
         }
@@ -168,18 +124,7 @@ impl SessionScanner {
 
 impl Default for SessionScanner {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Decode Claude's path encoding (- → /).
-fn decode_path(encoded: &str) -> String {
-    // Claude encodes paths by replacing / with -
-    // e.g., "-Users-mjmoshiri-project" → "/Users/mjmoshiri/project"
-    if encoded.starts_with('-') {
-        encoded.replacen('-', "/", 1).replace('-', "/")
-    } else {
-        encoded.replace('-', "/")
+        Self::new().expect("HOME environment variable must be set")
     }
 }
 
@@ -188,8 +133,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_decode_path() {
-        assert_eq!(decode_path("-Users-name-project"), "/Users/name/project");
-        assert_eq!(decode_path("Users-name-project"), "Users/name/project");
+    fn test_projects_dir() {
+        let scanner = SessionScanner::with_dir(PathBuf::from("/tmp/.claude"));
+        assert_eq!(scanner.projects_dir(), PathBuf::from("/tmp/.claude/projects"));
     }
 }

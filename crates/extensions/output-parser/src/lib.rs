@@ -37,12 +37,12 @@ impl Extension for OutputParserExtension {
         let rules = vec![
             PatternRule {
                 pattern: r"(?i)do you want to proceed|allow|deny|yes/no".to_string(),
-                target_state: "core.permission_needed".to_string(),
+                target_state: "your_turn".to_string(),
                 confidence: 0.7,
             },
             PatternRule {
                 pattern: r"(?i)\[waiting for input\]|permission required".to_string(),
-                target_state: "core.permission_needed".to_string(),
+                target_state: "your_turn".to_string(),
                 confidence: 0.8,
             },
         ];

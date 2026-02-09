@@ -11,35 +11,11 @@ import { ClaudeSession } from "./types";
 import { toggleSettings } from "../settings";
 import { toggleProfiles } from "../profiles";
 
-// Module-level sidebar state (same pattern as command palette)
-let sidebarVisible = localStorage.getItem("sidebarVisible") !== "false";
-let sidebarWidth = parseInt(localStorage.getItem("sidebarWidth") || "200", 10);
 const MIN_WIDTH = 150;
 const MAX_WIDTH = 400;
-let sidebarListeners: Array<() => void> = [];
 
-function notifySidebar() {
-  sidebarListeners.forEach((l) => l());
-  // Apply to DOM
-  const el = document.querySelector(".app-sidebar") as HTMLElement;
-  if (el) {
-    if (sidebarVisible) {
-      el.classList.remove("collapsed");
-      el.style.width = `${sidebarWidth}px`;
-      el.style.minWidth = `${sidebarWidth}px`;
-    } else {
-      el.classList.add("collapsed");
-      el.style.width = "";
-      el.style.minWidth = "";
-    }
-  }
-  localStorage.setItem("sidebarVisible", String(sidebarVisible));
-}
-
-function toggleSidebar() {
-  sidebarVisible = !sidebarVisible;
-  notifySidebar();
-}
+// Custom event for toggling sidebar from keybinding
+const SIDEBAR_TOGGLE_EVENT = "tab-bar:toggle-sidebar";
 
 async function cycleTabs(direction: 1 | -1, stateFilter?: string) {
   const sessions = await invoke<SessionInfo[]>("list_sessions");
@@ -55,17 +31,19 @@ async function cycleTabs(direction: 1 | -1, stateFilter?: string) {
 }
 
 const STATE_COLORS: Record<string, string> = {
-  active: "#4caf50",
-  running: "#2196f3",
-  idle: "#808080",
-  your_turn: "#ff9800",
+  active: "var(--green, #30D158)",
+  running: "var(--accent, #0A84FF)",
+  your_turn: "var(--orange, #FF9F0A)",
+  paused: "var(--red, #FF453A)",
+  idle: "var(--text-tertiary, #666)",
 };
 
 const STATE_LABELS: Record<string, string> = {
   active: "Active",
   running: "Running",
-  idle: "Idle",
   your_turn: "Your Turn",
+  paused: "Paused",
+  idle: "Idle",
 };
 
 function ContextMenu({
@@ -73,6 +51,7 @@ function ContextMenu({
   y,
   sessionId,
   sessionState,
+  previousSessionId,
   onClose,
   onRefresh,
   onRename,
@@ -81,10 +60,32 @@ function ContextMenu({
   y: number;
   sessionId: string;
   sessionState: string;
+  previousSessionId: string | null;
   onClose: () => void;
   onRefresh: () => void;
   onRename: (id: string) => void;
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ x, y });
+
+  // Reposition if overflowing viewport
+  useEffect(() => {
+    if (menuRef.current) {
+      const rect = menuRef.current.getBoundingClientRect();
+      let newX = x;
+      let newY = y;
+      if (rect.right > window.innerWidth) {
+        newX = window.innerWidth - rect.width - 8;
+      }
+      if (rect.bottom > window.innerHeight) {
+        newY = window.innerHeight - rect.height - 8;
+      }
+      if (newX !== x || newY !== y) {
+        setPos({ x: Math.max(8, newX), y: Math.max(8, newY) });
+      }
+    }
+  }, [x, y]);
+
   useEffect(() => {
     const handler = () => onClose();
     document.addEventListener("click", handler);
@@ -126,6 +127,26 @@ function ContextMenu({
     onClose();
   };
 
+  const handleHide = async () => {
+    try {
+      await invoke("set_session_hidden", { sessionId, hidden: true });
+      onRefresh();
+    } catch (err) {
+      console.error("[ContextMenu] Hide failed:", err);
+    }
+    onClose();
+  };
+
+  const handleViewChain = async () => {
+    try {
+      const chain = await invoke<SessionInfo[]>("get_session_chain", { sessionId });
+      console.log("[ContextMenu] Session chain:", chain.map((s) => `${s.title} (${s.id.slice(0, 8)})`));
+    } catch (err) {
+      console.error("[ContextMenu] View chain failed:", err);
+    }
+    onClose();
+  };
+
   const handleClose = async () => {
     try {
       await invoke("close_session", { sessionId });
@@ -138,26 +159,37 @@ function ContextMenu({
 
   return (
     <div
+      ref={menuRef}
       className="history-context-menu"
-      style={{ top: y, left: x }}
+      role="menu"
+      aria-label="Session actions"
+      style={{ top: pos.y, left: pos.x }}
     >
-      <button type="button" className="history-context-item" onClick={handleRename}>
+      <button type="button" role="menuitem" className="history-context-item" onClick={handleRename}>
         Rename
       </button>
-      <button type="button" className="history-context-item" onClick={handleFork}>
+      <button type="button" role="menuitem" className="history-context-item" onClick={handleFork}>
         Fork
       </button>
       {sessionState !== "idle" && (
-        <button type="button" className="history-context-item" onClick={handleMarkIdle}>
+        <button type="button" role="menuitem" className="history-context-item" onClick={handleMarkIdle}>
           Mark as Idle
         </button>
       )}
       {sessionState === "idle" && (
-        <button type="button" className="history-context-item" onClick={handleMarkActive}>
+        <button type="button" role="menuitem" className="history-context-item" onClick={handleMarkActive}>
           Mark as Active
         </button>
       )}
-      <button type="button" className="history-context-item" onClick={handleClose}>
+      <button type="button" role="menuitem" className="history-context-item" onClick={handleHide}>
+        Hide Session
+      </button>
+      {previousSessionId && (
+        <button type="button" role="menuitem" className="history-context-item" onClick={handleViewChain}>
+          View History Chain
+        </button>
+      )}
+      <button type="button" role="menuitem" className="history-context-item" onClick={handleClose}>
         Close
       </button>
     </div>
@@ -208,24 +240,55 @@ function SidePanel() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [width, setWidth] = useState(sidebarWidth);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const [sidebarVisible, setSidebarVisible] = useState(
+    () => localStorage.getItem("sidebarVisible") !== "false"
+  );
+  const [width, setWidth] = useState(
+    () => parseInt(localStorage.getItem("sidebarWidth") || "200", 10)
+  );
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
     sessionId: string;
     sessionState: string;
+    previousSessionId: string | null;
   } | null>(null);
 
+  // Apply sidebar width/visibility to the parent .app-sidebar element
+  useEffect(() => {
+    // Find the parent sidebar element via DOM traversal
+    const el = sidebarRef.current?.closest(".app-sidebar") as HTMLElement;
+    if (!el) return;
+
+    if (sidebarVisible) {
+      el.classList.remove("collapsed");
+      el.style.width = `${width}px`;
+      el.style.minWidth = `${width}px`;
+    } else {
+      el.classList.add("collapsed");
+      el.style.width = "";
+      el.style.minWidth = "";
+    }
+  }, [sidebarVisible, width]);
+
+  // Listen for toggle sidebar events from keybindings
+  useEffect(() => {
+    const handleToggle = () => {
+      setSidebarVisible(prev => {
+        const next = !prev;
+        localStorage.setItem("sidebarVisible", String(next));
+        return next;
+      });
+    };
+    window.addEventListener(SIDEBAR_TOGGLE_EVENT, handleToggle);
+    return () => window.removeEventListener(SIDEBAR_TOGGLE_EVENT, handleToggle);
+  }, []);
+
   const handleResize = useCallback((delta: number) => {
-    setWidth((prev) => {
+    setWidth(prev => {
       const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, prev + delta));
-      sidebarWidth = newWidth;
       localStorage.setItem("sidebarWidth", String(newWidth));
-      const el = document.querySelector(".app-sidebar") as HTMLElement;
-      if (el && sidebarVisible) {
-        el.style.width = `${newWidth}px`;
-        el.style.minWidth = `${newWidth}px`;
-      }
       return newWidth;
     });
   }, []);
@@ -246,12 +309,10 @@ function SidePanel() {
     refresh();
     const unsubs: Array<() => void> = [];
 
-    // Listen to core events with smarter handling
     listen<{ topic: string; payload: Record<string, unknown> }>("core-event", (e) => {
       if (!mounted) return;
       const { topic, payload } = e.payload;
 
-      // For active session changes, update immediately without full refresh
       if (topic === "session.active_changed") {
         const newActiveId = payload.session_id as string;
         if (newActiveId) {
@@ -260,12 +321,12 @@ function SidePanel() {
         return;
       }
 
-      // For other events, do full refresh
       if (
         topic === "session.created" ||
         topic === "session.closed" ||
         topic === "session.state_changed" ||
-        topic === "session.renamed"
+        topic === "session.renamed" ||
+        topic === "session.metadata_changed"
       ) {
         refresh();
       }
@@ -288,6 +349,10 @@ function SidePanel() {
     refresh();
   };
 
+  const [showTitlePrompt, setShowTitlePrompt] = useState(false);
+  const [pendingDir, setPendingDir] = useState<string | null>(null);
+  const [titleInput, setTitleInput] = useState("");
+
   const handleNewTab = async () => {
     const dir = await open({
       title: "Select Working Directory",
@@ -295,13 +360,30 @@ function SidePanel() {
     });
     if (!dir) return;
     const dirName = dir.split("/").filter(Boolean).pop() || dir;
+    setPendingDir(dir);
+    setTitleInput(dirName);
+    setShowTitlePrompt(true);
+  };
+
+  const handleTitleSubmit = async () => {
+    if (!pendingDir) return;
+    const title = titleInput.trim() || pendingDir.split("/").filter(Boolean).pop() || pendingDir;
     await invoke("create_session", {
       request: {
         provider_id: "claude-code",
-        title: dirName,
-        working_directory: dir,
+        title,
+        working_directory: pendingDir,
       },
     });
+    setShowTitlePrompt(false);
+    setPendingDir(null);
+    setTitleInput("");
+  };
+
+  const handleTitleCancel = () => {
+    setShowTitlePrompt(false);
+    setPendingDir(null);
+    setTitleInput("");
   };
 
   const handleNewTerminal = async () => {
@@ -309,19 +391,6 @@ function SidePanel() {
       request: { provider_id: "terminal", title: "Terminal" },
     });
   };
-
-  // Apply initial sidebar state (collapsed + width)
-  useEffect(() => {
-    const el = document.querySelector(".app-sidebar") as HTMLElement;
-    if (el) {
-      if (!sidebarVisible) {
-        el.classList.add("collapsed");
-      } else {
-        el.style.width = `${width}px`;
-        el.style.minWidth = `${width}px`;
-      }
-    }
-  }, [width]);
 
   // Listen for F2 rename trigger
   useEffect(() => {
@@ -366,10 +435,11 @@ function SidePanel() {
   const handleContextMenu = (e: React.MouseEvent, session: SessionInfo) => {
     e.preventDefault();
     setContextMenu({
-      x: Math.min(e.clientX, window.innerWidth - 120),
-      y: Math.min(e.clientY, window.innerHeight - 120),
+      x: e.clientX,
+      y: e.clientY,
       sessionId: session.id,
       sessionState: session.state,
+      previousSessionId: session.previous_session_id,
     });
   };
 
@@ -412,7 +482,7 @@ function SidePanel() {
     return acc;
   }, {});
 
-  const groupOrder = ["your_turn", "running", "active", "idle"];
+  const groupOrder = ["your_turn", "running", "active", "paused", "idle"];
   const sortedGroups = Object.entries(groups).sort(([a], [b]) => {
     const ai = groupOrder.indexOf(a);
     const bi = groupOrder.indexOf(b);
@@ -430,6 +500,8 @@ function SidePanel() {
       onClick={() => handleSelect(s.id)}
       onContextMenu={(e) => handleContextMenu(e, s)}
       title={s.summary ?? s.working_directory ?? undefined}
+      role="treeitem"
+      aria-selected={s.id === activeId}
     >
       <div className="side-panel-item-info">
         {editingId === s.id ? (
@@ -441,6 +513,7 @@ function SidePanel() {
             onKeyDown={(e) => handleRenameKeyDown(e, s.id)}
             autoFocus
             onClick={(e) => e.stopPropagation()}
+            aria-label="Rename session"
           />
         ) : (
           <span className="side-panel-item-title" onDoubleClick={() => handleDoubleClick(s)}>
@@ -474,8 +547,8 @@ function SidePanel() {
   );
 
   return (
-    <div className="side-panel">
-      <div className="side-panel-toolbar">
+    <div className="side-panel" ref={el => { sidebarRef.current = el; }} role="tree" aria-label="Session list">
+      <div className="side-panel-toolbar" role="toolbar" aria-label="Session actions">
         <SearchBar onResultClick={handleSearchResultClick} inputRef={searchInputRef} />
         <button className="side-panel-new-btn" onClick={handleNewTab} title="New Session (Cmd+T)" aria-label="New Session">
           +
@@ -484,22 +557,24 @@ function SidePanel() {
           $
         </button>
         <button className="side-panel-new-btn" onClick={toggleProfiles} title="Profiles (Cmd+Shift+P)" aria-label="Profiles">
-          ▶
+          &#9654;
         </button>
         <button className="side-panel-new-btn" onClick={toggleSettings} title="Settings (Cmd+,)" aria-label="Settings">
-          ⚙
+          &#9881;
         </button>
       </div>
       <div className="side-panel-groups">
         {sortedGroups.map(([state, items]) => (
-          <div key={state} className="side-panel-group">
+          <div key={state} className="side-panel-group" role="group" aria-label={`${STATE_LABELS[state] ?? state} sessions`}>
             <div
               className="side-panel-group-header"
               onClick={() => toggleGroup(state)}
+              role="button"
+              aria-expanded={!collapsed[state]}
             >
               <span
                 className="side-panel-group-indicator"
-                style={{ backgroundColor: STATE_COLORS[state] ?? "#808080" }}
+                style={{ backgroundColor: STATE_COLORS[state] ?? "var(--text-tertiary)" }}
               />
               <span className="side-panel-group-label">
                 {STATE_LABELS[state] ?? state}
@@ -517,14 +592,16 @@ function SidePanel() {
           </div>
         ))}
         {terminalSessions.length > 0 && (
-          <div className="side-panel-group">
+          <div className="side-panel-group" role="group" aria-label="Terminal sessions">
             <div
               className="side-panel-group-header"
               onClick={() => toggleGroup("_terminals")}
+              role="button"
+              aria-expanded={!collapsed["_terminals"]}
             >
               <span
                 className="side-panel-group-indicator"
-                style={{ backgroundColor: "#a0a0a0" }}
+                style={{ backgroundColor: "var(--text-secondary, #999)" }}
               />
               <span className="side-panel-group-label">Terminals</span>
               <span className="side-panel-group-count">{terminalSessions.length}</span>
@@ -543,18 +620,35 @@ function SidePanel() {
           <div className="side-panel-empty">
             <span>No active sessions</span>
             <span className="side-panel-empty-hint">
-              Press <kbd className="kbd">⌘T</kbd> to start a new session
+              Press <kbd className="kbd">&#8984;T</kbd> to start a new session
             </span>
           </div>
         )}
         <HistorySection onResume={handleResume} onFork={handleFork} />
       </div>
+      {showTitlePrompt && (
+        <div className="side-panel-title-prompt">
+          <input
+            className="side-panel-rename-input"
+            value={titleInput}
+            onChange={(e) => setTitleInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleTitleSubmit();
+              else if (e.key === "Escape") handleTitleCancel();
+            }}
+            placeholder="Session title..."
+            autoFocus
+            aria-label="New session title"
+          />
+        </div>
+      )}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
           sessionId={contextMenu.sessionId}
           sessionState={contextMenu.sessionState}
+          previousSessionId={contextMenu.previousSessionId}
           onClose={() => setContextMenu(null)}
           onRefresh={refresh}
           onRename={startRename}
@@ -565,22 +659,93 @@ function SidePanel() {
   );
 }
 
-function SidebarToggleButton() {
-  const [visible, setVisible] = useState(sidebarVisible);
+const SET_TITLE_EVENT = "tab-bar:set-title";
+
+function TitlePrompt() {
+  const [visible, setVisible] = useState(false);
+  const [value, setValue] = useState("");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const listener = () => setVisible(sidebarVisible);
-    sidebarListeners.push(listener);
-    return () => {
-      sidebarListeners = sidebarListeners.filter((l) => l !== listener);
+    const show = async () => {
+      const active = await invoke<string | null>("get_active_session");
+      if (!active) return;
+      const sessions = await invoke<SessionInfo[]>("list_sessions");
+      const session = sessions.find((s) => s.id === active);
+      setSessionId(active);
+      setValue(session?.title || "");
+      setVisible(true);
     };
+    window.addEventListener(SET_TITLE_EVENT, show);
+    return () => window.removeEventListener(SET_TITLE_EVENT, show);
+  }, []);
+
+  useEffect(() => {
+    if (visible && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [visible]);
+
+  const close = () => {
+    setVisible(false);
+    setValue("");
+    setSessionId(null);
+    const terminal = document.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement;
+    if (terminal) terminal.focus();
+  };
+
+  const submit = async () => {
+    const trimmed = value.trim();
+    if (trimmed && sessionId) {
+      await invoke("rename_session", { sessionId, title: trimmed });
+    }
+    close();
+  };
+
+  if (!visible) return null;
+
+  return (
+    <div className="title-prompt-backdrop" onClick={close}>
+      <div className="title-prompt" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={inputRef}
+          className="title-prompt-input"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+            else if (e.key === "Escape") close();
+          }}
+          placeholder="Session title..."
+          aria-label="Set session title"
+        />
+      </div>
+    </div>
+  );
+}
+
+function SidebarToggleButton() {
+  const [visible, setVisible] = useState(
+    () => localStorage.getItem("sidebarVisible") !== "false"
+  );
+
+  useEffect(() => {
+    const handleToggle = () => {
+      setVisible(prev => !prev);
+    };
+    window.addEventListener(SIDEBAR_TOGGLE_EVENT, handleToggle);
+    return () => window.removeEventListener(SIDEBAR_TOGGLE_EVENT, handleToggle);
   }, []);
 
   return (
     <button
       className="sidebar-toggle"
-      onClick={toggleSidebar}
+      onClick={() => window.dispatchEvent(new Event(SIDEBAR_TOGGLE_EVENT))}
       title={visible ? "Hide Sidebar (Cmd+B)" : "Show Sidebar (Cmd+B)"}
+      aria-label={visible ? "Hide sidebar" : "Show sidebar"}
+      aria-expanded={visible}
     >
       {visible ? "\u2039" : "\u203A"}
     </button>
@@ -603,6 +768,13 @@ export function createTabBarExtension(): FrontendExtension {
         extensionId: "tab-bar",
       });
 
+      ctx.componentRegistry.register(SLOTS.OVERLAY, {
+        id: "tab-bar-title-prompt",
+        component: TitlePrompt,
+        priority: 20,
+        extensionId: "tab-bar",
+      });
+
       ctx.componentRegistry.register(SLOTS.SIDE_PANEL, {
         id: "tab-bar-side-panel",
         component: SidePanel,
@@ -615,7 +787,7 @@ export function createTabBarExtension(): FrontendExtension {
         keys: "Cmd+B",
         label: "Toggle Sidebar",
         extensionId: "tab-bar",
-        handler: toggleSidebar,
+        handler: () => window.dispatchEvent(new Event(SIDEBAR_TOGGLE_EVENT)),
       });
 
       ctx.keybindingManager.register({
@@ -659,6 +831,16 @@ export function createTabBarExtension(): FrontendExtension {
         extensionId: "tab-bar",
         handler: () => {
           window.dispatchEvent(new Event("tab-bar:rename-active"));
+        },
+      });
+
+      ctx.keybindingManager.register({
+        id: "tab-bar.set-title",
+        keys: "Ctrl+R",
+        label: "Set Title",
+        extensionId: "tab-bar",
+        handler: () => {
+          window.dispatchEvent(new Event(SET_TITLE_EVENT));
         },
       });
 
@@ -765,7 +947,6 @@ export function createTabBarExtension(): FrontendExtension {
               },
             });
           } else {
-            // Fallback: create terminal without specific directory
             await invoke("create_session", {
               request: { provider_id: "terminal", title: "Terminal" },
             });
@@ -798,7 +979,6 @@ export function createTabBarExtension(): FrontendExtension {
               },
             });
           } else {
-            // Fallback: open directory picker
             const dir = await open({
               title: "Select Working Directory",
               directory: true,
@@ -837,8 +1017,7 @@ export function createTabBarExtension(): FrontendExtension {
         label: "Search History",
         extensionId: "tab-bar",
         handler: async () => {
-          // Focus the search input in the side panel
-          const input = document.querySelector(".search-bar-input") as HTMLInputElement;
+          const input = document.querySelector("[data-search-bar]") as HTMLInputElement;
           if (input) input.focus();
         },
       });

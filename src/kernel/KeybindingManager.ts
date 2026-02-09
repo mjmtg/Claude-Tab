@@ -2,11 +2,10 @@ import type { IKeybindingManager, KeybindingDefinition } from "../types/kernel";
 
 const STORAGE_KEY = "claude-tabs-keybindings";
 
-// Re-export KeybindingDefinition as Keybinding for backwards compatibility
-export type Keybinding = KeybindingDefinition;
-
 export class KeybindingManager implements IKeybindingManager {
-  private bindings = new Map<string, Keybinding>();
+  private bindings = new Map<string, KeybindingDefinition>();
+  /** Reverse index: key string -> binding ID for O(1) lookup */
+  private keyIndex = new Map<string, string>();
   private active = true;
   private customKeys: Record<string, string> = {};
 
@@ -31,28 +30,39 @@ export class KeybindingManager implements IKeybindingManager {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(this.customKeys));
   }
 
-  register(binding: Keybinding): () => void {
+  register(binding: KeybindingDefinition): () => void {
     const defaultKeys = binding.keys;
     const customKey = this.customKeys[binding.id];
-    const stored: Keybinding = {
+    const stored: KeybindingDefinition = {
       ...binding,
       defaultKeys,
       keys: customKey ?? defaultKeys,
     };
     this.bindings.set(binding.id, stored);
+    this.keyIndex.set(stored.keys, binding.id);
     return () => {
+      const current = this.bindings.get(binding.id);
+      if (current) {
+        this.keyIndex.delete(current.keys);
+      }
       this.bindings.delete(binding.id);
     };
   }
 
   unregister(id: string): void {
+    const binding = this.bindings.get(id);
+    if (binding) {
+      this.keyIndex.delete(binding.keys);
+    }
     this.bindings.delete(id);
   }
 
   updateKeys(id: string, newKeys: string): void {
     const binding = this.bindings.get(id);
     if (!binding) return;
+    this.keyIndex.delete(binding.keys);
     binding.keys = newKeys;
+    this.keyIndex.set(newKeys, id);
     this.customKeys[id] = newKeys;
     this.saveCustomKeys();
   }
@@ -60,7 +70,9 @@ export class KeybindingManager implements IKeybindingManager {
   resetKeys(id: string): void {
     const binding = this.bindings.get(id);
     if (!binding || !binding.defaultKeys) return;
+    this.keyIndex.delete(binding.keys);
     binding.keys = binding.defaultKeys;
+    this.keyIndex.set(binding.defaultKeys, id);
     delete this.customKeys[id];
     this.saveCustomKeys();
   }
@@ -69,17 +81,12 @@ export class KeybindingManager implements IKeybindingManager {
     this.active = active;
   }
 
-  getAll(): Keybinding[] {
+  getAll(): KeybindingDefinition[] {
     return Array.from(this.bindings.values());
   }
 
   hasBinding(keyStr: string): boolean {
-    for (const [, binding] of this.bindings) {
-      if (binding.keys === keyStr) {
-        return true;
-      }
-    }
-    return false;
+    return this.keyIndex.has(keyStr);
   }
 
   eventToKeyString(e: KeyboardEvent): string {
@@ -114,12 +121,18 @@ export class KeybindingManager implements IKeybindingManager {
 
     const keyStr = this.eventToKeyString(e);
 
-    for (const [, binding] of this.bindings) {
-      if (binding.keys === keyStr) {
+    // Let Escape pass through to the terminal when no binding uses it
+    if (keyStr === "Escape" && !this.keyIndex.has("Escape")) {
+      return;
+    }
+
+    const bindingId = this.keyIndex.get(keyStr);
+    if (bindingId) {
+      const binding = this.bindings.get(bindingId);
+      if (binding) {
         e.preventDefault();
         e.stopPropagation();
         binding.handler();
-        return;
       }
     }
   }
@@ -127,5 +140,6 @@ export class KeybindingManager implements IKeybindingManager {
   destroy(): void {
     window.removeEventListener("keydown", this.handleKeyDown);
     this.bindings.clear();
+    this.keyIndex.clear();
   }
 }

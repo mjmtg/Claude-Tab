@@ -3,8 +3,9 @@ use claude_tabs_core::config::Config;
 use claude_tabs_core::event_bus::EventBus;
 use claude_tabs_core::profile::ProfileStore;
 use claude_tabs_core::session::SessionStore;
+use claude_tabs_core::state_machine::StateMachine;
 use claude_tabs_pty::{OutputStream, PtyManager};
-use claude_tabs_storage::StorageBackend;
+use claude_tabs_storage::{SessionScanner, StorageBackend};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tracing::debug;
@@ -17,6 +18,8 @@ pub struct AppState {
     pub output_stream: Arc<OutputStream>,
     pub storage: Arc<dyn StorageBackend>,
     pub profile_store: Arc<ProfileStore>,
+    pub state_machine: Arc<StateMachine>,
+    pub scanner: Arc<SessionScanner>,
 }
 
 pub struct IpcBridge {

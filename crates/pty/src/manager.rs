@@ -4,7 +4,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
@@ -12,10 +12,6 @@ struct PtyInstance {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     size: PtySize,
 }
-
-// Safety: PtyInstance is only accessed through Mutex, so Send is sufficient.
-// MasterPty is Send but not Sync, which is fine under Mutex.
-unsafe impl Sync for PtyInstance {}
 
 pub struct PtyManager {
     instances: Arc<Mutex<HashMap<String, PtyInstance>>>,
@@ -98,15 +94,22 @@ impl PtyManager {
             .get_mut(session_id)
             .ok_or_else(|| PtyError::NotFound(session_id.to_string()))?;
 
-        if let Some(writer) = &mut instance.writer {
-            writer
-                .write_all(data)
-                .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-            writer
-                .flush()
-                .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
+        match &mut instance.writer {
+            Some(writer) => {
+                writer
+                    .write_all(data)
+                    .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
+                writer
+                    .flush()
+                    .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
+                Ok(())
+            }
+            None => {
+                Err(PtyError::WriteFailed(format!(
+                    "Writer unavailable for session {}", session_id
+                )))
+            }
         }
-        Ok(())
     }
 
     pub fn resize(&self, session_id: &str, size: PtySize) -> Result<(), PtyError> {
@@ -148,11 +151,13 @@ impl PtyManager {
         let mut instances = self.instances.lock();
         if let Some(instance) = instances.get_mut(session_id) {
             match instance.child.try_wait() {
-                Ok(Some(_)) => false,
-                Ok(None) => true,
+                Ok(Some(_)) => false,          // Process exited
+                Ok(None) => true,              // Still running
                 Err(e) => {
-                    error!(session_id = %session_id, error = %e, "Error checking PTY status");
-                    false
+                    // Don't assume dead on transient errors — assume alive to avoid
+                    // false reconciliation killing active sessions
+                    debug!(session_id = %session_id, error = %e, "Error checking PTY status, assuming alive");
+                    true
                 }
             }
         } else {

@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::event_bus::EventBus;
 use crate::session::SessionStore;
-use crate::state_machine::StateRegistry;
 use crate::traits::detector::DetectorRegistry;
 use crate::traits::extension::{ActivationContext, Extension, ExtensionError, ExtensionManifest};
 use crate::traits::provider::ProviderRegistry;
@@ -15,7 +14,6 @@ pub struct PluginHost {
     activated: Vec<String>,
     event_bus: Arc<EventBus>,
     config: Arc<Config>,
-    state_registry: Arc<StateRegistry>,
     detector_registry: Arc<DetectorRegistry>,
     reaction_registry: Arc<ReactionRegistry>,
     session_store: Arc<SessionStore>,
@@ -26,7 +24,6 @@ impl PluginHost {
     pub fn new(
         event_bus: Arc<EventBus>,
         config: Arc<Config>,
-        state_registry: Arc<StateRegistry>,
         detector_registry: Arc<DetectorRegistry>,
         reaction_registry: Arc<ReactionRegistry>,
         session_store: Arc<SessionStore>,
@@ -37,7 +34,6 @@ impl PluginHost {
             activated: Vec::new(),
             event_bus,
             config,
-            state_registry,
             detector_registry,
             reaction_registry,
             session_store,
@@ -67,7 +63,6 @@ impl PluginHost {
             let mut ctx = ActivationContext {
                 event_bus: self.event_bus.clone(),
                 config: self.config.clone(),
-                state_registry: self.state_registry.clone(),
                 detector_registry: self.detector_registry.clone(),
                 reaction_registry: self.reaction_registry.clone(),
                 session_store: self.session_store.clone(),

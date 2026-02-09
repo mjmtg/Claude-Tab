@@ -1,3 +1,4 @@
+use crate::state_machine::SessionState;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock as SyncRwLock;
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ pub type SessionId = String;
 pub struct Session {
     pub id: SessionId,
     pub provider_id: String,
-    pub state: String,
+    pub state: SessionState,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub working_directory: Option<String>,
@@ -24,7 +25,7 @@ impl Session {
         Self {
             id: Uuid::new_v4().to_string(),
             provider_id: provider_id.into(),
-            state: "active".to_string(),
+            state: SessionState::Active,
             title: String::new(),
             created_at: Utc::now(),
             working_directory: None,
@@ -83,9 +84,9 @@ impl SessionStore {
         self.sessions.read().await.get(id).map(|arc| arc.read().clone())
     }
 
-    pub async fn update_state(&self, id: &str, state: impl Into<String>) -> bool {
+    pub async fn update_state(&self, id: &str, state: SessionState) -> bool {
         if let Some(session_arc) = self.sessions.read().await.get(id) {
-            session_arc.write().state = state.into();
+            session_arc.write().state = state;
             true
         } else {
             false

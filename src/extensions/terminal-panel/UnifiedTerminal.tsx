@@ -39,17 +39,24 @@ export function UnifiedTerminal({ sessionId, isActive = false }: UnifiedTerminal
   useEffect(() => {
     if (!containerRef.current || terminalRef.current) return;
 
+    // Read terminal colors from CSS custom properties
+    const computedStyle = getComputedStyle(document.documentElement);
+    const termBg = computedStyle.getPropertyValue("--terminal-bg").trim() || "#1e1e1e";
+    const termFg = computedStyle.getPropertyValue("--terminal-fg").trim() || "#e5e5e5";
+    const termCursor = computedStyle.getPropertyValue("--terminal-cursor").trim() || "#e5e5e5";
+    const termSelection = computedStyle.getPropertyValue("--terminal-selection").trim() || "rgba(255,255,255,0.15)";
+
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
       disableStdin: false,
       fontSize: 14,
-      fontFamily: "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
+      fontFamily: "SF Mono, JetBrains Mono, Menlo, Monaco, Consolas, monospace",
       theme: {
-        background: "#1a1a2e",
-        foreground: "#e0e0e0",
-        cursor: "#e0e0e0",
-        selectionBackground: "#3a3a5e",
+        background: termBg,
+        foreground: termFg,
+        cursor: termCursor,
+        selectionBackground: termSelection,
       },
       allowProposedApi: true,
       scrollback: 10000,
@@ -87,7 +94,13 @@ export function UnifiedTerminal({ sessionId, isActive = false }: UnifiedTerminal
     });
 
     // Handle keyboard input - send directly to PTY
+    // Suppress focus-in/out escape sequences briefly after mount to prevent
+    // ^[[I / ^[[O appearing before the shell/Claude Code is ready
+    const mountTime = Date.now();
     term.onData((data) => {
+      if (Date.now() - mountTime < 500 && (data === '\x1b[I' || data === '\x1b[O')) {
+        return;
+      }
       sendToPty(data);
     });
 
@@ -157,10 +170,17 @@ export function UnifiedTerminal({ sessionId, isActive = false }: UnifiedTerminal
   }, [sessionId]);
 
   // Resize observer
+  // Skip resize when container has zero dimensions (display: none),
+  // otherwise the PTY gets resized to 0 rows/cols which freezes the process.
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      if (width === 0 || height === 0) return;
+
       if (fitAddonRef.current && terminalRef.current) {
         fitAddonRef.current.fit();
         invoke("resize_pty", {
@@ -175,13 +195,22 @@ export function UnifiedTerminal({ sessionId, isActive = false }: UnifiedTerminal
     return () => observer.disconnect();
   }, [sessionId]);
 
-  // Handle activation - fit and focus when becoming visible
+  // Handle activation - focus immediately, fit in next frame
   useEffect(() => {
     if (isActive && terminalRef.current && fitAddonRef.current) {
+      // Focus immediately to avoid gap where focus falls to document.body
+      // (browser blurs old terminal when its container gets display:none)
+      const activeEl = document.activeElement;
+      const isOverlayFocused = activeEl && activeEl.closest(
+        "[role='dialog'], .command-palette-backdrop, .settings-backdrop, .profiles-backdrop"
+      );
+      if (!isOverlayFocused) {
+        terminalRef.current.focus();
+      }
+      // Fit in next frame (needs visible layout dimensions)
       requestAnimationFrame(() => {
-        if (fitAddonRef.current && terminalRef.current) {
+        if (fitAddonRef.current) {
           fitAddonRef.current.fit();
-          terminalRef.current.focus();
         }
       });
     }
@@ -194,7 +223,7 @@ export function UnifiedTerminal({ sessionId, isActive = false }: UnifiedTerminal
         width: "100%",
         height: "100%",
         overflow: "hidden",
-        backgroundColor: "#1a1a2e",
+        backgroundColor: "var(--terminal-bg, #1e1e1e)",
       }}
     />
   );

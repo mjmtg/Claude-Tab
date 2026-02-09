@@ -30,7 +30,7 @@ impl Extension for SystemNotifyExtension {
         let handler = Arc::new(move |event: &claude_tabs_core::event_bus::Event| {
             if event.topic == "session.state_changed" {
                 if let Some(to) = event.payload.get("to").and_then(|v| v.as_str()) {
-                    if to == "core.permission_needed" {
+                    if to == "your_turn" {
                         send_macos_notification(
                             "Claude Tabs",
                             "A session needs your attention",

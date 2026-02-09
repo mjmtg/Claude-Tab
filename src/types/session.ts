@@ -7,6 +7,10 @@ export interface SessionInfo {
   subtitle: string | null;
   tags: string[] | null;
   summary: string | null;
+  user_set_title: boolean;
+  generated_title: string | null;
+  hidden: boolean;
+  previous_session_id: string | null;
 }
 
 export interface CreateSessionRequest {
