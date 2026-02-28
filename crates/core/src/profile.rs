@@ -608,6 +608,32 @@ pub fn read_system_prompt_content(name: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to read system prompt '{}': {}", name, e))
 }
 
+/// Save a system prompt file to ~/.claude-tabs/system-prompts/{name}.md
+pub fn save_system_prompt(name: &str, content: &str) -> Result<(), String> {
+    let dir = dirs_home().join(".claude-tabs").join("system-prompts");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create system-prompts dir: {}", e))?;
+    let path = dir.join(format!("{}.md", name));
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write system prompt '{}': {}", name, e))?;
+    info!(name = %name, "Saved system prompt");
+    Ok(())
+}
+
+/// Delete a system prompt file
+pub fn delete_system_prompt(name: &str) -> Result<(), String> {
+    let path = dirs_home()
+        .join(".claude-tabs")
+        .join("system-prompts")
+        .join(format!("{}.md", name));
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete system prompt '{}': {}", name, e))?;
+        info!(name = %name, "Deleted system prompt");
+    }
+    Ok(())
+}
+
 fn load_profile_file(path: &Path) -> Result<Profile, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -620,6 +646,7 @@ fn dirs_home() -> PathBuf {
         .map(PathBuf::from)
         .expect("HOME environment variable must be set")
 }
+
 
 pub fn cleanup_temp_mcp_config(session_id: &str) {
     let path = dirs_home()

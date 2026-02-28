@@ -413,6 +413,80 @@
   flex-shrink: 0;
 }
 
+/* --- Quick Profile Launcher --- */
+.quick-launcher {
+  max-height: 500px;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+}
+
+.quick-launcher-badge {
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  padding: 1px 6px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.quick-launcher-inputs {
+  display: flex;
+  flex-direction: column;
+}
+
+.quick-launcher-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+}
+
+.quick-launcher-back {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 var(--space-1);
+  line-height: 1;
+}
+
+.quick-launcher-back:hover {
+  color: var(--text-primary);
+}
+
+.quick-launcher-profile-name {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.quick-launcher-fields {
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.quick-launcher-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.quick-launcher-footer {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* --- Title Prompt (Ctrl+R) --- */
 .title-prompt-backdrop {
   position: fixed;
@@ -2213,7 +2287,14 @@
   gap: var(--space-1);
 }
 
+.system-prompt-picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 .system-prompt-picker-select {
+  flex: 1;
   background: var(--bg-input);
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
@@ -2228,6 +2309,27 @@
   border-color: var(--accent);
 }
 
+.system-prompt-action-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.system-prompt-action-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-prominent);
+}
+
+.system-prompt-action-danger:hover {
+  color: var(--red);
+  border-color: var(--red);
+}
+
 .system-prompt-picker-preview {
   font-size: 11px;
   color: var(--text-tertiary);
@@ -2238,6 +2340,19 @@
   max-height: 60px;
   overflow: hidden;
 }
+
+.system-prompt-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.system-prompt-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 
 /* --- System prompt picker in new-tab dialog --- */
 

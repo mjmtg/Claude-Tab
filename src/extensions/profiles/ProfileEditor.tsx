@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Profile, ProfileInput, WorkingDirConfig } from "../../types/profile";
 import { SkillPicker } from "./SkillPicker";
 import { McpPicker } from "./McpPicker";
@@ -15,6 +15,29 @@ function generateId(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+/** Extract {{key}} placeholders from a prompt template */
+function extractTemplateKeys(template: string): string[] {
+  const regex = /\{\{(\w+)\}\}/g;
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  let match;
+  while ((match = regex.exec(template)) !== null) {
+    const key = match[1];
+    if (!seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+/** Convert a key like "pr_url" to a label like "Pr Url" */
+function keyToLabel(key: string): string {
+  return key
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) {
@@ -52,6 +75,45 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
     profile?.system_prompt_file || null
   );
 
+  // Auto-detect inputs from {{key}} in prompt template
+  useEffect(() => {
+    const templateKeys = extractTemplateKeys(promptTemplate);
+    if (templateKeys.length === 0) return;
+
+    setInputs((prev) => {
+      const existingByKey = new Map(prev.map((inp) => [inp.key, inp]));
+      const merged: ProfileInput[] = [];
+
+      // Add template-detected inputs (preserve existing settings if key matches)
+      for (const key of templateKeys) {
+        if (existingByKey.has(key)) {
+          merged.push(existingByKey.get(key)!);
+        } else {
+          merged.push({
+            key,
+            label: keyToLabel(key),
+            input_type: "text",
+            required: true,
+          });
+        }
+      }
+
+      // Keep any manually-added inputs that aren't from the template
+      const templateKeySet = new Set(templateKeys);
+      for (const inp of prev) {
+        if (!templateKeySet.has(inp.key) && inp.key && inp.label) {
+          merged.push(inp);
+        }
+      }
+
+      // Only update if actually changed
+      const prevKeys = prev.map((i) => i.key).join(",");
+      const newKeys = merged.map((i) => i.key).join(",");
+      if (prevKeys === newKeys) return prev;
+      return merged;
+    });
+  }, [promptTemplate]);
+
   const handleAddInput = () => {
     setInputs([
       ...inputs,
@@ -66,7 +128,6 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
   const handleInputChange = (index: number, field: keyof ProfileInput, value: string | boolean) => {
     const updated = [...inputs];
     updated[index] = { ...updated[index], [field]: value };
-    // Auto-generate key from label
     if (field === "label" && typeof value === "string") {
       updated[index].key = generateId(value);
     }
@@ -150,7 +211,7 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
         <div className="profiles-field">
           <label className="profiles-field-label">
             Prompt Template
-            <span className="profiles-field-hint">Use {"{{key}}"} for inputs</span>
+            <span className="profiles-field-hint">Use {"{{key}}"} to auto-create inputs</span>
           </label>
           <textarea
             className="profiles-field-textarea"
@@ -166,6 +227,11 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
             <span>Inputs</span>
             <button className="profiles-add-btn" onClick={handleAddInput}>+</button>
           </div>
+          {inputs.length === 0 && (
+            <span className="profiles-field-hint" style={{ padding: "4px 0" }}>
+              No inputs. Use {"{{key}}"} in the template or add manually.
+            </span>
+          )}
           {inputs.map((input, i) => (
             <div key={i} className="profiles-input-row">
               <input
@@ -182,6 +248,7 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
               >
                 <option value="text">Text</option>
                 <option value="select">Select</option>
+                <option value="list">List</option>
               </select>
               <button
                 className="profiles-remove-btn"

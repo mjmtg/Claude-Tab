@@ -1076,3 +1076,22 @@ pub fn list_mcp_servers() -> Result<Vec<McpServerEntry>, CommandError> {
 pub fn list_system_prompts() -> Result<Vec<SystemPromptEntry>, CommandError> {
     Ok(profile::list_system_prompts())
 }
+
+#[tauri::command]
+pub fn read_system_prompt(name: String) -> Result<String, CommandError> {
+    profile::read_system_prompt_content(&name)
+        .map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub fn save_system_prompt(name: String, content: String) -> Result<(), CommandError> {
+    profile::save_system_prompt(&name, &content)
+        .map_err(CommandError::Internal)
+}
+
+#[tauri::command]
+pub fn delete_system_prompt(name: String) -> Result<(), CommandError> {
+    profile::delete_system_prompt(&name)
+        .map_err(CommandError::Internal)
+}
+

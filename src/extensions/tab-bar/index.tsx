@@ -1071,7 +1071,7 @@ export function createTabBarExtension(): FrontendExtension {
 
       ctx.keybindingManager.register({
         id: "tab-bar.fork-session",
-        keys: "Cmd+Shift+K",
+        keys: "Cmd+Alt+K",
         label: "Fork Current Session",
         extensionId: "tab-bar",
         handler: async () => {

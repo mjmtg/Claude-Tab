@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Profile, ProfileLaunchRequest } from "../../types/profile";
 import { ProfileEditor } from "./ProfileEditor";
+import { InputField } from "./InputField";
 
 let showProfiles = false;
 let profilesListeners: Array<() => void> = [];
@@ -248,29 +249,12 @@ export function ProfilesPanel() {
                         {input.label}
                         {input.required && <span className="profiles-required">*</span>}
                       </label>
-                      {input.input_type === "select" && input.options ? (
-                        <select
-                          className="profiles-field-input"
-                          value={inputValues[input.key] || ""}
-                          onChange={(e) => handleInputChange(input.key, e.target.value)}
-                        >
-                          <option value="">Select...</option>
-                          {input.options.map((opt) => (
-                            <option key={opt} value={opt}>{opt}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          className="profiles-field-input"
-                          type="text"
-                          placeholder={input.placeholder || ""}
-                          value={inputValues[input.key] || ""}
-                          onChange={(e) => handleInputChange(input.key, e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleLaunch(profile);
-                          }}
-                        />
-                      )}
+                      <InputField
+                        input={input}
+                        value={inputValues[input.key] || ""}
+                        onChange={(v) => handleInputChange(input.key, v)}
+                        onEnter={() => handleLaunch(profile)}
+                      />
                     </div>
                   ))}
                   {(!profile.working_directory ||

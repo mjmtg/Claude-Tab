@@ -106,6 +106,9 @@ pub fn run() {
             // MCP and system prompt discovery
             commands::list_mcp_servers,
             commands::list_system_prompts,
+            commands::read_system_prompt,
+            commands::save_system_prompt,
+            commands::delete_system_prompt,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();

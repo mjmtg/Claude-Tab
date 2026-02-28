@@ -23,6 +23,7 @@ import { createCountdownTimerExtension } from "../extensions/countdown-timer";
 import { createCommandPaletteExtension } from "../extensions/command-palette";
 import { createSettingsExtension } from "../extensions/settings";
 import { createProfilesExtension } from "../extensions/profiles";
+import { createProfileLauncherExtension } from "../extensions/profile-launcher";
 import { createWindowFocusExtension } from "../extensions/window-focus";
 import { createInactivitySwitchExtension } from "../extensions/inactivity-switch";
 
@@ -58,6 +59,7 @@ function useKernel() {
     extensionHost.register(createCommandPaletteExtension());
     extensionHost.register(createSettingsExtension());
     extensionHost.register(createProfilesExtension());
+    extensionHost.register(createProfileLauncherExtension());
     extensionHost.register(createWindowFocusExtension());
     extensionHost.register(createInactivitySwitchExtension());
 
