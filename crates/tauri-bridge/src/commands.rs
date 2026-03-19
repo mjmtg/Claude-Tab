@@ -138,6 +138,20 @@ pub struct CreateSessionRequest {
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Resolve PATH from the user's login shell so app bundles (macOS) can find
+/// CLIs that are only in shell-configured paths (e.g. /opt/homebrew/bin).
+fn get_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    std::process::Command::new(&shell)
+        .args(["-l", "-c", "echo $PATH"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        })
+}
+
 #[tauri::command]
 pub async fn create_session(
     state: State<'_, AppState>,
@@ -158,6 +172,12 @@ pub async fn create_session(
     let mut env = std::collections::HashMap::new();
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("CLAUDE_TABS_SESSION_ID".to_string(), session_id.clone());
+
+    // Inject shell PATH so app bundles (macOS) can find CLIs like `claude`
+    if let Some(shell_path) = get_shell_path() {
+        env.insert("PATH".to_string(), shell_path);
+    }
+
     env.insert(
         "CLAUDE_TABS_SOCKET".to_string(),
         HookListener::socket_path().to_string_lossy().to_string(),
