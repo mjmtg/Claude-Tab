@@ -38,5 +38,13 @@
     "security": {
       "csp": null
     }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/MjMoshiri/Claude-Tab/releases/latest/download/latest.json"
+      ],
+      "pubkey": ""
+    }
   }
 }
